@@ -17,11 +17,11 @@ The script has a custom offline-recovery mechanism:
 
 ## Environment Variables & Multiple Instances
 - The script uses `python-dotenv`.
-- It dynamically loads configuration files passed via command-line arguments (e.g., `python telegram_to_email.py .env2`).
+- It dynamically loads configuration files passed via command-line arguments (e.g., `python main.py .env2`).
 - We use `load_dotenv(env_file, override=True)` to ensure multiple terminals running different `.env` files don't leak environment variables to each other if cached or exported globally.
 
 ## Modifying Logic
-When editing `telegram_to_email.py`:
+When editing `main.py`:
 - Do not remove `zoneinfo.ZoneInfo("Asia/Kolkata")`.
 - Keep the `Notion-Version: 2022-06-28` header intact.
 - Media forwarding is currently logged as text `[Media received without caption]`. If you implement actual media downloading in the future, ensure it downloads to a temporary path, attaches to the email as `MIMEMultipart`, and then deletes the temporary file to preserve container disk space.

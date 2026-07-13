@@ -39,6 +39,9 @@ EMAIL_TO = os.environ.get('EMAIL_TO', '')
 NOTION_API_KEY = os.environ.get('NOTION_API_KEY', '')
 NOTION_PAGE_ID = os.environ.get('NOTION_PAGE_ID', '')
 
+# Discord Configuration
+DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', '')
+
 # Session file name (will be saved as userbot_session.session)
 SESSION_NAME = 'userbot_session'
 
@@ -129,6 +132,39 @@ async def send_to_notion_async(text, message_date_utc, is_new_day):
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, send_to_notion_sync, text, message_date_utc, is_new_day)
 
+def send_to_discord_sync(text, media_path=None):
+    """Synchronous function to post a message (and optionally media) to a Discord Webhook."""
+    if not DISCORD_WEBHOOK_URL:
+        # Silently skip if discord is not configured
+        return
+
+    data = {"content": text}
+    try:
+        if media_path and os.path.exists(media_path):
+            with open(media_path, "rb") as f:
+                # 'file' is commonly accepted, Discord accepts 'file' or 'files[0]' for attachments
+                response = requests.post(DISCORD_WEBHOOK_URL, data=data, files={"file": f})
+            # Cleanup the local file after upload
+            try:
+                os.remove(media_path)
+                print(f"Cleaned up temporary file: {media_path}")
+            except Exception as cleanup_err:
+                print(f"Failed to delete temporary file {media_path}: {cleanup_err}")
+        else:
+            response = requests.post(DISCORD_WEBHOOK_URL, json=data)
+        
+        response.raise_for_status()
+        print("Successfully logged message to Discord.")
+    except Exception as e:
+        print(f"Failed to log to Discord: {e}")
+        if isinstance(e, requests.exceptions.HTTPError) and e.response is not None:
+            print(f"Discord API Error: {e.response.text}")
+
+async def send_to_discord_async(text, media_path=None):
+    """Asynchronously run the blocking Discord API function."""
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, send_to_discord_sync, text, media_path)
+
 async def main():
     if not API_ID or not API_HASH or not TARGET_CHANNEL_ID:
         print("Error: Telegram API configuration is incomplete.")
@@ -185,6 +221,19 @@ async def main():
             print(f"Error writing last date: {e}")
 
     async def process_telegram_message(message, channel_id):
+        media_path = None
+        if message.media:
+            # Create a temp directory if it doesn't exist
+            if not os.path.exists("temp_media"):
+                os.makedirs("temp_media")
+            try:
+                # Download media
+                print(f"Downloading media for message {message.id}...")
+                media_path = await message.download_media(file="temp_media/")
+                print(f"Downloaded media to: {media_path}")
+            except Exception as e:
+                print(f"Failed to download media: {e}")
+                
         # Extract the text of the message, or note if it is media without a caption
         if message.text:
             text = message.text
@@ -214,6 +263,9 @@ async def main():
         
         # Dispatch the Notion logging task as a background task.
         asyncio.create_task(send_to_notion_async(text, message.date, is_new_day))
+        
+        # Dispatch the Discord logging task as a background task.
+        asyncio.create_task(send_to_discord_async(text, media_path))
         
         # Update checkpoint
         write_checkpoint(channel_id, message.id)
