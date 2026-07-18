@@ -2,3 +2,6 @@
 __pycache__/
 *userbot*
 .env*
+.checkpoint*
+.last_date*
+temp_media/
