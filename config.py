@@ -35,3 +35,15 @@ NOTION_PAGE_ID = os.environ.get('NOTION_PAGE_ID', '')
 
 # Discord Configuration
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', '')
+
+# Vertex AI Configuration
+VERTEX_PROJECT_ID = os.environ.get('VERTEX_PROJECT_ID', '')
+VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
+
+# Google Sheets Configuration
+GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
+
+# Inject Google Cloud Credentials for Vertex AI & Google Sheets
+# Only set if the file exists AND is non-empty (an empty file causes SDK errors)
+if os.path.exists('credentials.json') and os.path.getsize('credentials.json') > 0:
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'credentials.json'

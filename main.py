@@ -18,6 +18,8 @@ from state_manager import (
 )
 from services.notion_service import send_to_notion_async
 from services.discord_service import send_to_discord_async
+from services.gemini_service import extract_trade_async
+from services.google_sheets_service import append_to_sheet_async
 
 async def main():
     if not API_ID or not API_HASH or not TARGET_CHANNEL_ID:
@@ -72,6 +74,12 @@ async def main():
         
         # Dispatch the Discord logging task as a background task.
         asyncio.create_task(send_to_discord_async(text, media_path))
+        
+        # AI Trade Extraction
+        trade_data = await extract_trade_async(text)
+        if trade_data:
+            formatted_time = message_date_ist.strftime("%Y-%m-%d %H:%M:%S")
+            asyncio.create_task(append_to_sheet_async(trade_data, formatted_time))
         
         # Update checkpoint
         write_checkpoint(channel_id, message.id)
