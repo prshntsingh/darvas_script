@@ -128,7 +128,33 @@ async def main():
             print(f"Created initial checkpoint at message ID {latest[0].id}.")
 
     print(f"Listening for new live messages in channel: {TARGET_CHANNEL_ID}...")
-    await client.run_until_disconnected()
+    
+    # Setup graceful shutdown for Railway zero-downtime deployments
+    stop_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    
+    def shutdown_handler(*args):
+        print("\nReceived termination signal. Initiating graceful shutdown...")
+        stop_event.set()
+        
+    import signal
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, shutdown_handler, sig)
+        except NotImplementedError:
+            # Fallback for Windows if run locally
+            signal.signal(sig, shutdown_handler)
+            
+    # Keep the script running until a signal is received
+    try:
+        # We use wait() with a timeout in a loop so it can catch exceptions if needed,
+        # but wait() directly works too. To support Windows fallbacks better, we use a loop.
+        while not stop_event.is_set():
+            await asyncio.sleep(1)
+    finally:
+        print("Disconnecting Telegram client to prevent AuthKeyDuplicatedError on next run...")
+        await client.disconnect()
+        print("Disconnected cleanly.")
 
 if __name__ == '__main__':
     # Run the main async loop
