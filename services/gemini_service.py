@@ -57,6 +57,8 @@ async def extract_trade_async(text):
     - Buying Price: The exact entry/buying price mentioned. If NO specific price is mentioned, use an empty string "".
     - TARGET: The absolute target price (🎯) mentioned. If only a percentage target is given (e.g., "target 10%"), leave this as "" and fill TARGET_PERCENT instead.
     - TARGET_PERCENT: If the target is mentioned as a percentage (e.g., "10% target", "upside of 15%"), extract just the number (e.g., "10" or "15"). If an absolute target price is given or no target at all, use "".
+    - STOP_LOSS: The absolute stop loss price mentioned (e.g., "SL 1200", "stop loss at 1200"). If only a percentage is given, leave this as "" and fill STOP_LOSS_PERCENT instead. If not mentioned at all, use "".
+    - STOP_LOSS_PERCENT: If the stop loss is mentioned as a percentage (e.g., "SL 5%", "risk 3%"), extract just the number (e.g., "5" or "3"). If an absolute stop loss is given or none at all, use "".
     - Reason: Any rationale or reason mentioned for the trade.
 
     Format your response EXACTLY as a JSON object with the following schema:
@@ -66,6 +68,8 @@ async def extract_trade_async(text):
         "Buying Price": string,
         "TARGET": string,
         "TARGET_PERCENT": string,
+        "STOP_LOSS": string,
+        "STOP_LOSS_PERCENT": string,
         "Reason": string
     }}
     
