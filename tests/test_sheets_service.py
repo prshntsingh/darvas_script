@@ -29,6 +29,9 @@ async def test_append_to_sheet(mock_oauth, mock_env_get, mock_exists):
         "NAME": "NSE:RELIANCE",
         "Buying Price": "2500",
         "TARGET": "2600",
+        "TARGET_PERCENT": "",
+        "STOP_LOSS": "",
+        "STOP_LOSS_PERCENT": "",
         "Reason": "Good earnings"
     }
     
@@ -42,6 +45,7 @@ async def test_append_to_sheet(mock_oauth, mock_env_get, mock_exists):
     
     # Assert row appended with correct data and formulas
     # next_row should be 11
+    # Columns: A=Name, B=Gain, C=Buy, D=Target, E=Date, F=Reason, G=Current Price, H=Price Source, I=Stop Loss
     expected_row = [
         "NSE:RELIANCE",
         "=(G11-C11)/C11",  # gain_formula
@@ -49,6 +53,8 @@ async def test_append_to_sheet(mock_oauth, mock_env_get, mock_exists):
         "2600",            # target
         "2026-07-20 10:00:00",
         "Good earnings",
-        '=GOOGLEFINANCE(A11, "price")' # current_price_formula
+        '=GOOGLEFINANCE(A11, "price")',  # current_price_formula
+        "Recommended",     # price_source (since buying price was provided)
+        ""                 # stop_loss (not provided)
     ]
     mock_sheet.append_row.assert_called_once_with(expected_row, value_input_option='USER_ENTERED')
