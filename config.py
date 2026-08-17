@@ -1,5 +1,7 @@
 import os
 import sys
+import json
+from dataclasses import dataclass
 from dotenv import load_dotenv
 
 # Parse sys.argv for environment file
@@ -12,7 +14,7 @@ API_ID_STR = os.environ.get('TG_API_ID', '')
 API_ID = int(API_ID_STR) if API_ID_STR else 0
 API_HASH = os.environ.get('TG_API_HASH', '')
 
-# Target Channel
+# Target Channel (legacy single-channel config, kept for backward compatibility)
 TARGET_CHANNEL_ID_STR = os.environ.get('TG_TARGET_CHANNEL_ID', '')
 TARGET_CHANNEL_ID = int(TARGET_CHANNEL_ID_STR) if TARGET_CHANNEL_ID_STR else 0
 
@@ -33,7 +35,7 @@ EMAIL_TO = os.environ.get('EMAIL_TO', '')
 NOTION_API_KEY = os.environ.get('NOTION_API_KEY', '')
 NOTION_PAGE_ID = os.environ.get('NOTION_PAGE_ID', '')
 
-# Discord Configuration
+# Discord Configuration (legacy single-webhook, kept for backward compatibility)
 DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', '')
 
 # Vertex AI Configuration
@@ -47,3 +49,54 @@ GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 # Only set if the file exists AND is non-empty (an empty file causes SDK errors)
 if os.path.exists('credentials.json') and os.path.getsize('credentials.json') > 0:
     os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = 'credentials.json'
+
+# --- Multiple Channel Mappings ---
+# Each mapping defines a 1:1 Telegram channel → Discord webhook pair.
+# Set CHANNEL_MAPPINGS as a JSON array in your .env file, e.g.:
+#   CHANNEL_MAPPINGS=[{"telegram_channel_id": -100123, "discord_webhook_url": "https://...", "label": "my-channel"}]
+# If not set, falls back to the legacy TG_TARGET_CHANNEL_ID + DISCORD_WEBHOOK_URL.
+
+@dataclass
+class ChannelMapping:
+    telegram_channel_id: int
+    discord_webhook_url: str
+    label: str
+
+def _parse_channel_mappings():
+    """Parse CHANNEL_MAPPINGS from env, or fall back to legacy single-channel vars."""
+    raw = os.environ.get('CHANNEL_MAPPINGS', '').strip()
+    
+    if raw:
+        try:
+            entries = json.loads(raw)
+            if not isinstance(entries, list) or len(entries) == 0:
+                raise ValueError("CHANNEL_MAPPINGS must be a non-empty JSON array")
+            
+            mappings = []
+            for entry in entries:
+                tg_id = int(entry['telegram_channel_id'])
+                webhook = entry.get('discord_webhook_url', '')
+                label = entry.get('label', str(tg_id))
+                mappings.append(ChannelMapping(
+                    telegram_channel_id=tg_id,
+                    discord_webhook_url=webhook,
+                    label=label
+                ))
+            return mappings
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
+            print(f"Warning: Failed to parse CHANNEL_MAPPINGS: {e}")
+            print("Falling back to legacy single-channel configuration.")
+    
+    # Fallback: build a single mapping from the legacy env vars
+    if TARGET_CHANNEL_ID:
+        return [ChannelMapping(
+            telegram_channel_id=TARGET_CHANNEL_ID,
+            discord_webhook_url=DISCORD_WEBHOOK_URL,
+            label='default'
+        )]
+    
+    return []
+
+CHANNEL_MAPPINGS = _parse_channel_mappings()
+# O(1) lookup: telegram_channel_id → ChannelMapping
+CHANNEL_MAP = {m.telegram_channel_id: m for m in CHANNEL_MAPPINGS}
