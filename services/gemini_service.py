@@ -135,6 +135,7 @@ CRITICAL RULES:
 4. NO PRICE / CMP: If no explicit entry price is mentioned, set upper_entry_price to 0.
 5. VAGUE/ANALYSIS/MULTIPLE: If the message recommends buying MORE THAN ONE stock, OR if it is just commentary/future planning, output exactly "IGNORE" as the stock_symbol.
 6. THIS BOT TRADES EQUITY ONLY. Ignore options/futures completely.
+7. BUY INTENT REQUIRED: If the message does not explicitly suggest entering a long position (e.g., lacks 'buy', 'added', 'accumulate', 'cmp', 'sl', 'target', or similar intent), OR if it just states a ticker (e.g. '#HEG'), OR if it suggests booking profit/selling (e.g., 'book some'), output EXACTLY "IGNORE" as the stock_symbol.
 
 Message: """
 

@@ -37,7 +37,7 @@ _PRICE_PATTERN = re.compile(
 
 # BUY intent filter: message must contain at least one of these to be actionable
 _BUY_INTENT_PATTERN = re.compile(
-    r'\b(buy|bought|added|add|sl|target|entry|cmp)\b',
+    r'\b(buy|bought|added|add|accumulate|accumulated|sl|target|entry|cmp)\b',
     re.IGNORECASE,
 )
 
@@ -56,10 +56,11 @@ _INDEX_KEYWORDS = frozenset({
 })
 
 # --- Sell/Short/Exit/F&O keywords (BUY-ONLY mode) ---
-_SELL_KEYWORDS = frozenset({
-    "sell", "short", "exit", "booked", "close", "square off",
-    "sl hit", "target hit", "ce", "pe", "call", "put",
-})
+# Use word-boundary regex to prevent false positives like "reliance" matching "ce"
+_SELL_PATTERN = re.compile(
+    r'\b(?:sell|short|exit|book|booked|booking|close|square\s+off|sl\s+hit|target\s+hit|(?<!\w)ce(?!\w)|(?<!\w)pe(?!\w)|call|put)\b',
+    re.IGNORECASE,
+)
 
 # --- Analysis/vague keywords ---
 _ANALYSIS_KEYWORDS = frozenset({
@@ -97,8 +98,8 @@ def filter_message(text: str) -> str | None:
     if any(kw in msg_lower for kw in _INDEX_KEYWORDS):
         return "Index trade detected (NIFTY/BANKNIFTY/etc.)"
 
-    # 🛑 Sell/Short/Exit/F&O blocker
-    if any(kw in msg_lower for kw in _SELL_KEYWORDS):
+    # 🛑 Sell/Short/Exit/F&O blocker (word-boundary regex)
+    if _SELL_PATTERN.search(text):
         return "Sell/Short/Exit/Option signal (BUY-ONLY mode)"
 
     # Extract hashtags for multi-stock check
@@ -111,9 +112,9 @@ def filter_message(text: str) -> str | None:
     if any(kw in msg_lower for kw in _ANALYSIS_KEYWORDS):
         return "Future planning or analysis content"
 
-    # ✅ BUY intent filter
-    if not _BUY_INTENT_PATTERN.search(text) and "@" not in text and "#" not in text:
-        return "No BUY intent detected (casual chat)"
+    # ✅ BUY intent filter (must have a buy keyword OR a price specifier like @)
+    if not _BUY_INTENT_PATTERN.search(text) and "@" not in text:
+        return "No BUY intent detected (casual chat or just a ticker)"
 
     return None  # Message passes all filters
 

@@ -30,6 +30,7 @@ from config import (
     SESSION_NAME,
     CHANNEL_MAPPINGS,
     CHANNEL_MAP,
+    LOG_GROUP_ID,
 )
 from state_manager import (
     read_checkpoint, 
@@ -56,6 +57,44 @@ WS_AUTH_TOKEN = os.environ.get("WS_AUTH_TOKEN", "")
 
 # --- IST Timezone (per AGENTS.md: never remove this) ---
 IST_ZONE = zoneinfo.ZoneInfo("Asia/Kolkata")
+
+
+# ============================================================================
+# Telegram Trade Logger
+# ============================================================================
+
+_log_channel_disabled = False
+_log_entity = None
+
+async def send_trade_log(message: str):
+    """
+    Send a trade log message to the Telegram log group.
+    Non-blocking — fire and forget via asyncio.create_task.
+    Auto-disables if the account lacks write permissions.
+    """
+    global _log_channel_disabled, _log_entity
+    if _log_channel_disabled or not LOG_GROUP_ID or not _telegram_client:
+        return
+    try:
+        clean = message.strip()
+        if clean:
+            # Use the resolved entity if we have it, otherwise fallback to the ID
+            target = _log_entity if _log_entity else LOG_GROUP_ID
+            await _telegram_client.send_message(target, clean)
+    except Exception as e:
+        error_msg = str(e)
+        if "can't write" in error_msg.lower() or "ChatWriteForbiddenError" in error_msg:
+            logger.warning(
+                f"Cannot write to log channel {LOG_GROUP_ID}. "
+                f"Make sure the Telegram account is an admin with post permissions. "
+                f"Trade logging disabled for this session."
+            )
+            _log_channel_disabled = True
+        elif "invalid peer" in error_msg.lower():
+            logger.error(f"Failed to resolve log group peer. Disabling logs. Error: {e}")
+            _log_channel_disabled = True
+        else:
+            logger.error(f"Telegram trade log error: {e}")
 
 
 # ============================================================================
@@ -181,7 +220,11 @@ async def process_telegram_message(message, channel_id):
         block_reason = filter_message(text)
         if block_reason:
             logger.info(f"[{mapping.label}] 🛡️ BLOCKED: {block_reason}")
+            asyncio.create_task(send_trade_log(f"[🛡️] BLOCKED: {block_reason}\n\nMessage: {text[:100]}"))
         else:
+            # Log signal received
+            asyncio.create_task(send_trade_log(f"[🚀] Signal Received: {text}"))
+            
             t_start = time.perf_counter_ns()
             try:
                 trade_signal = await hybrid_extract_trade(text, timestamp=formatted_time)
@@ -189,10 +232,26 @@ async def process_telegram_message(message, channel_id):
                 extract_ms = (t_extract - t_start) / 1_000_000
                 
                 if trade_signal:
+                    symbol = trade_signal['stock_symbol']
+                    price = trade_signal['entry_price']
+                    order_type = trade_signal['order_type']
+                    source = trade_signal['source']
+                    price_display = 'MARKET' if price == 0 else price
+                    
+                    # Log extraction result
+                    if source == 'REGEX':
+                        asyncio.create_task(send_trade_log(
+                            f"[*] Local Fast-Path Parsed -> Symbol: {symbol} | Price: {price_display}"
+                        ))
+                    else:
+                        asyncio.create_task(send_trade_log(
+                            f"[*] AI Extracted -> Symbol: {symbol} | Price: {price_display}"
+                        ))
+                    
                     # Inject latency metadata into the broadcast payload
                     trade_signal["_latency_ms"] = {
                         "extraction": round(extract_ms, 2),
-                        "source": trade_signal["source"],
+                        "source": source,
                     }
                     
                     await manager.broadcast(trade_signal)
@@ -203,10 +262,22 @@ async def process_telegram_message(message, channel_id):
                     trade_signal["_latency_ms"]["broadcast"] = round(broadcast_ms, 2)
                     trade_signal["_latency_ms"]["total_server"] = round(total_ms, 2)
                     
+                    # Compute limit price with 1% buffer (for log display)
+                    if order_type == 'LIMIT' and price > 0:
+                        buffer_price = float(f"{round((price * 1.01) / 0.05) * 0.05:.2f}")
+                    else:
+                        buffer_price = 0.0
+                    
+                    asyncio.create_task(send_trade_log(
+                        f"[*] Executing -> Symbol: {symbol} | Segment: NSE_EQ "
+                        f"| QTY: 1 | Type: {order_type} | Price: {buffer_price}\n"
+                        f"[📡] Broadcast to {manager.active_count} client(s) in {total_ms:.1f}ms"
+                    ))
+                    
                     logger.info(
-                        f"[⚡ LATENCY] {trade_signal['stock_symbol']} "
-                        f"@ {'MARKET' if trade_signal['entry_price'] == 0 else trade_signal['entry_price']} "
-                        f"| extract={extract_ms:.1f}ms ({trade_signal['source']}) "
+                        f"[⚡ LATENCY] {symbol} "
+                        f"@ {price_display} "
+                        f"| extract={extract_ms:.1f}ms ({source}) "
                         f"| broadcast={broadcast_ms:.1f}ms "
                         f"| total={total_ms:.1f}ms"
                     )
@@ -216,6 +287,7 @@ async def process_telegram_message(message, channel_id):
                     )
             except Exception as e:
                 logger.error(f"Equity hybrid extraction failed: {e}", exc_info=True)
+                asyncio.create_task(send_trade_log(f"[X] Extraction error: {e}"))
     else:
         logger.debug(f"[{mapping.label}] Trading disabled for this channel. Skipping extraction.")
     
@@ -309,6 +381,34 @@ async def start_telegram_listener():
 
     channel_labels = ", ".join(m.label for m in CHANNEL_MAPPINGS)
     logger.info(f"Listening for new live messages in: [{channel_labels}]")
+
+    # Send startup notification to Telegram log channel
+    if LOG_GROUP_ID:
+        try:
+            global _log_entity
+            # Remove the -100 prefix if it exists to get the bare entity ID
+            bare_id = abs(LOG_GROUP_ID)
+            if str(LOG_GROUP_ID).startswith("-100"):
+                bare_id = int(str(LOG_GROUP_ID)[4:])
+
+            async for dialog in client.iter_dialogs(limit=None):
+                if dialog.id == LOG_GROUP_ID or getattr(dialog.entity, 'id', 0) == bare_id:
+                    _log_entity = dialog.entity
+                    break
+            
+            if not _log_entity:
+                _log_entity = await client.get_entity(LOG_GROUP_ID)
+                
+            trading_channels = [m.label for m in CHANNEL_MAPPINGS if m.enable_trading]
+            await send_trade_log(
+                f"🟢 **Trading Bot Engine Started (Equity Mode)**\n"
+                f"Trading enabled for: {', '.join(trading_channels) or 'none'}\n"
+                f"Listening for new signals..."
+            )
+        except Exception as e:
+            logger.error(f"Failed to resolve LOG_GROUP_ID {LOG_GROUP_ID}: {e}. Trade logging disabled.")
+            global _log_channel_disabled
+            _log_channel_disabled = True
 
 
 async def stop_telegram_listener():

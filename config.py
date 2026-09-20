@@ -45,6 +45,10 @@ VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
 # Google Sheets Configuration
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 
+# Telegram Trade Log Channel (sends trade execution logs to a Telegram group)
+LOG_GROUP_ID_STR = os.environ.get('LOG_GROUP_ID', '')
+LOG_GROUP_ID = int(LOG_GROUP_ID_STR) if LOG_GROUP_ID_STR else 0
+
 # Inject Google Cloud Credentials for Vertex AI & Google Sheets
 # Only set if the file exists AND is non-empty (an empty file causes SDK errors)
 if os.path.exists('credentials.json') and os.path.getsize('credentials.json') > 0:
