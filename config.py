@@ -61,6 +61,7 @@ class ChannelMapping:
     telegram_channel_id: int
     discord_webhook_url: str
     label: str
+    enable_trading: bool = False  # Opt-in: only broadcast trade signals for this channel
 
 def _parse_channel_mappings():
     """Parse CHANNEL_MAPPINGS from env, or fall back to legacy single-channel vars."""
@@ -77,10 +78,12 @@ def _parse_channel_mappings():
                 tg_id = int(entry['telegram_channel_id'])
                 webhook = entry.get('discord_webhook_url', '')
                 label = entry.get('label', str(tg_id))
+                enable_trading = entry.get('enable_trading', False)
                 mappings.append(ChannelMapping(
                     telegram_channel_id=tg_id,
                     discord_webhook_url=webhook,
-                    label=label
+                    label=label,
+                    enable_trading=bool(enable_trading),
                 ))
             return mappings
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

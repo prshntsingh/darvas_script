@@ -1,4 +1,5 @@
 telethon
+cryptg
 requests
 python-dotenv
 google-cloud-aiplatform
@@ -9,3 +10,7 @@ pytest-asyncio
 pytest-mock
 google-genai
 aiohttp>=3.9.0
+fastapi
+uvicorn[standard]
+websockets>=12.0
+pydantic>=2.0
