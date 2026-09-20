@@ -45,6 +45,10 @@ VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
 # Google Sheets Configuration
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')
 
+# Telegram Trade Log Channel (sends trade execution logs to a Telegram group)
+LOG_GROUP_ID_STR = os.environ.get('LOG_GROUP_ID', '')
+LOG_GROUP_ID = int(LOG_GROUP_ID_STR) if LOG_GROUP_ID_STR else 0
+
 # Inject Google Cloud Credentials for Vertex AI & Google Sheets
 # Only set if the file exists AND is non-empty (an empty file causes SDK errors)
 if os.path.exists('credentials.json') and os.path.getsize('credentials.json') > 0:
@@ -61,6 +65,7 @@ class ChannelMapping:
     telegram_channel_id: int
     discord_webhook_url: str
     label: str
+    enable_trading: bool = False  # Opt-in: only broadcast trade signals for this channel
 
 def _parse_channel_mappings():
     """Parse CHANNEL_MAPPINGS from env, or fall back to legacy single-channel vars."""
@@ -77,10 +82,12 @@ def _parse_channel_mappings():
                 tg_id = int(entry['telegram_channel_id'])
                 webhook = entry.get('discord_webhook_url', '')
                 label = entry.get('label', str(tg_id))
+                enable_trading = entry.get('enable_trading', False)
                 mappings.append(ChannelMapping(
                     telegram_channel_id=tg_id,
                     discord_webhook_url=webhook,
-                    label=label
+                    label=label,
+                    enable_trading=bool(enable_trading),
                 ))
             return mappings
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

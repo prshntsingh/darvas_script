@@ -1,9 +1,22 @@
+"""
+Gemini AI trade extraction service.
+
+Three extraction pipelines:
+1. extract_trade_async(text) — Original equity trade extraction for Google Sheets (unchanged).
+2. extract_equity_trade_gemini(text) — Equity structured output for WebSocket broadcasting.
+3. hybrid_extract_trade(text, timestamp) — Regex-first, Gemini-fallback for equity signals.
+"""
+
 from google import genai
+from google.genai import types
 import json
 import os
+import asyncio
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from config import VERTEX_PROJECT_ID, VERTEX_LOCATION
+from models import GeminiEquitySignal
+from services.regex_service import extract_trade as regex_extract_trade
 
 # Initialize a global client
 _client = None
@@ -109,3 +122,133 @@ async def extract_trade_async(text):
     except Exception as e:
         print(f"Vertex AI analysis failed: {e}")
         return None
+
+
+# --- Equity-specific extraction using Gemini Structured Output ---
+
+_EQUITY_PROMPT = """You are an expert Indian stock market data extractor. Extract the trading symbol and the HIGHEST entry price from this message. 
+            
+CRITICAL RULES:
+1. SYMBOLS: Convert all brand names or shorthand into their OFFICIAL NSE/BSE EXCHANGE TICKER (e.g., 'sbi' -> 'SBIN', 'Reliance' -> 'RELIANCE').
+2. AMBIGUOUS GROUPS: Default to flagship stock (e.g., 'Tata' -> 'TATAMOTORS') unless specified.
+3. PRICE: If an entry price or price range is given, extract the highest number. Ignore SL and Allocation targets.
+4. NO PRICE / CMP: If no explicit entry price is mentioned, set upper_entry_price to 0.
+5. VAGUE/ANALYSIS/MULTIPLE: If the message recommends buying MORE THAN ONE stock, OR if it is just commentary/future planning, output exactly "IGNORE" as the stock_symbol.
+6. THIS BOT TRADES EQUITY ONLY. Ignore options/futures completely.
+7. BUY INTENT REQUIRED: If the message does not explicitly suggest entering a long position (e.g., lacks 'buy', 'added', 'accumulate', 'cmp', 'sl', 'target', or similar intent), OR if it just states a ticker (e.g. '#HEG'), OR if it suggests booking profit/selling (e.g., 'book some'), output EXACTLY "IGNORE" as the stock_symbol.
+
+Message: """
+
+# Model fallback chain — if one model is overloaded or times out, try the next
+_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
+
+
+async def extract_equity_trade_gemini(text: str) -> dict | None:
+    """
+    Extract equity trade signal using Gemini structured output.
+    
+    Uses model fallback chain with 7.5s timeout per model attempt.
+    Returns {stock_symbol, entry_price, order_type, source} or None.
+    """
+    if not _client:
+        print("Vertex AI Client missing. Skipping equity Gemini extraction.")
+        return None
+
+    prompt = _EQUITY_PROMPT + text
+
+    for model_name in _FALLBACK_MODELS:
+        try:
+            chat = _client.aio.chats.create(model=model_name)
+
+            response = await asyncio.wait_for(
+                chat.send_message(
+                    prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=GeminiEquitySignal,
+                        temperature=0.0,
+                    ),
+                ),
+                timeout=7.5,
+            )
+
+            signal = response.parsed
+            if not signal:
+                print(f"[GEMINI] {model_name}: No parsed response.")
+                continue
+
+            stock_symbol = signal.stock_symbol.upper()
+            entry_price = signal.upper_entry_price
+
+            # Block multi-stock or vague messages
+            if stock_symbol in ("MULTIPLE_SCRIPS", "IGNORE", "NONE", ""):
+                print(f"[GEMINI] AI blocked: '{stock_symbol}' — vague or multiple stocks.")
+                return None
+
+            order_type = "LIMIT" if entry_price > 0 else "MARKET"
+
+            print(f"[GEMINI] {model_name} extracted: {stock_symbol} @ {'MARKET' if entry_price == 0 else entry_price}")
+
+            return {
+                "stock_symbol": stock_symbol,
+                "entry_price": entry_price,
+                "order_type": order_type,
+                "source": "GEMINI",
+                "raw_text": text,
+                "timestamp": "",
+            }
+
+        except asyncio.TimeoutError:
+            print(f"[GEMINI] {model_name} timed out (>7.5s). Trying next model...")
+            continue
+
+        except Exception as e:
+            error_msg = str(e)
+            if "503" in error_msg or "UNAVAILABLE" in error_msg:
+                print(f"[GEMINI] {model_name} overloaded (503). Trying next model...")
+                continue
+            elif "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                print(f"[GEMINI] {model_name} rate limited (429). Trying next model...")
+                continue
+            else:
+                print(f"[GEMINI] {model_name} unhandled error: {error_msg}")
+                break
+
+    return None
+
+
+async def hybrid_extract_trade(text: str, timestamp: str = "") -> dict | None:
+    """
+    Two-stage equity trade extraction: Regex (fast-path) → Gemini (fallback).
+    
+    1. Tries deterministic regex extraction (<1ms).
+    2. If regex returns None, falls back to Gemini structured output.
+    3. If both fail, returns None (message is not an equity trade signal).
+    
+    Note: Message-level filters (index blocker, sell blocker, etc.) are applied
+    in main.py BEFORE calling this function.
+    
+    Args:
+        text: Raw message text from Telegram.
+        timestamp: IST-formatted timestamp string.
+        
+    Returns:
+        Trade signal dict or None.
+    """
+    if not text or not isinstance(text, str):
+        return None
+
+    # Stage 1: Fast-path regex
+    result = regex_extract_trade(text)
+    if result is not None:
+        result["timestamp"] = timestamp
+        print(f"[REGEX] Extracted: {result['stock_symbol']} @ {'MARKET' if result['entry_price'] == 0 else result['entry_price']}")
+        return result
+
+    # Stage 2: Gemini fallback
+    result = await extract_equity_trade_gemini(text)
+    if result is not None:
+        result["timestamp"] = timestamp
+        return result
+
+    return None
