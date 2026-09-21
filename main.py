@@ -32,6 +32,7 @@ from config import (
     CHANNEL_MAP,
     LOG_GROUP_ID,
 )
+from services.scrip_service import load_valid_scrips
 from state_manager import (
     read_checkpoint, 
     write_checkpoint, 
@@ -433,6 +434,8 @@ async def lifespan(app: FastAPI):
     """
     # Startup
     logger.info("FastAPI starting up — launching Telegram listener...")
+    # Load scrip master in a background thread to not block the event loop
+    await asyncio.to_thread(load_valid_scrips)
     telegram_task = asyncio.create_task(start_telegram_listener())
 
     # Give the client a moment to connect before accepting HTTP/WS traffic

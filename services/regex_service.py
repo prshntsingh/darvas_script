@@ -17,6 +17,7 @@ trading bot logic:
 
 import re
 from typing import Optional
+from services.scrip_service import VALID_EQUITY_SYMBOLS
 
 # --- Pre-compiled Patterns (executed once at import time) ---
 
@@ -151,6 +152,11 @@ def extract_trade(text: str) -> Optional[dict]:
                 candidate = symbol
 
     if not candidate:
+        return None
+
+    # --- Validate against Scrip Master (if loaded) ---
+    if VALID_EQUITY_SYMBOLS and candidate not in VALID_EQUITY_SYMBOLS:
+        # Candidate is not a known equity symbol, fallback to AI
         return None
 
     # --- Extract entry price ---
