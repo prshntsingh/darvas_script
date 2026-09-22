@@ -15,23 +15,9 @@ def send_to_discord_sync(text, message=None, media_path=None, webhook_url=None):
         # Silently skip if no webhook URL is provided
         return
 
-    # If a Telethon message object was passed with media, download it now
-    # (this runs in a thread executor, so we need to handle the async download)
     downloaded_path = media_path
     if downloaded_path is None and message is not None and hasattr(message, 'media') and message.media:
-        try:
-            if not os.path.exists("temp_media"):
-                os.makedirs("temp_media")
-            # Use synchronous download via Telethon's download_media
-            # Since we're in a thread executor, we create a new event loop for this
-            loop = asyncio.new_event_loop()
-            try:
-                downloaded_path = loop.run_until_complete(message.download_media(file="temp_media/"))
-                print(f"[Discord] Downloaded media to: {downloaded_path}")
-            finally:
-                loop.close()
-        except Exception as e:
-            print(f"[Discord] Failed to download media for Discord: {e}")
+        print("[Discord] Warning: message object passed to sync function. Media should be downloaded in async wrapper.")
 
     data = {"content": text}
     try:
@@ -57,5 +43,17 @@ def send_to_discord_sync(text, message=None, media_path=None, webhook_url=None):
 
 async def send_to_discord_async(text, message=None, media_path=None, webhook_url=None):
     """Asynchronously run the blocking Discord API function."""
+    downloaded_path = media_path
+    
+    # Download media in the main event loop before passing to the thread executor
+    if downloaded_path is None and message is not None and hasattr(message, 'media') and message.media:
+        try:
+            if not os.path.exists("temp_media"):
+                os.makedirs("temp_media")
+            downloaded_path = await message.download_media(file="temp_media/")
+            print(f"[Discord] Downloaded media to: {downloaded_path}")
+        except Exception as e:
+            print(f"[Discord] Failed to download media for Discord: {e}")
+
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, send_to_discord_sync, text, message, media_path, webhook_url)
+    await loop.run_in_executor(None, send_to_discord_sync, text, None, downloaded_path, webhook_url)
