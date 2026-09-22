@@ -79,13 +79,25 @@ BROKER=dhan
 
 # --- Dhan Credentials (if BROKER=dhan) ---
 DHAN_CLIENT_ID=your_dhan_client_id
-DHAN_ACCESS_TOKEN=your_dhan_access_token
-# Get these from: https://api.dhan.co → Create Access Token
+# Leave DHAN_ACCESS_TOKEN blank if you want the client to auto-generate it at startup!
+DHAN_ACCESS_TOKEN=
+# (Optional) Dhan Auto-Login credentials for 24/7 self-healing authentication:
+DHAN_PIN=your_6_digit_pin
+DHAN_TOTP_SECRET=your_totp_secret_key
 
 # --- Zerodha Credentials (if BROKER=zerodha) ---
 # KITE_API_KEY=your_kite_api_key
 # KITE_ACCESS_TOKEN=your_kite_access_token
-# Get these from: https://developers.kite.trade
+
+# --- Execution Filters ---
+# Comma-separated list of channel labels to execute trades for (empty = ALL channels).
+ALLOWED_CHANNELS=premium,test
+
+# --- Capital Allocation ---
+# Amount to invest per trade in INR (e.g., 10000). 
+TRADE_AMOUNT_INR=10000
+# Fixed quantity fallback for MARKET orders if live price fetch fails.
+DEFAULT_QUANTITY=10
 
 # IMPORTANT: Start with DRY_RUN=true to test without placing real orders
 DRY_RUN=true
@@ -171,8 +183,10 @@ The client receives JSON signals via WebSocket:
 - **BUY-ONLY** mode — no sell/short/exit orders
 - **CNC** product type (delivery, not intraday)
 - **LIMIT** orders get a 1% price buffer, rounded to tick size (₹0.05)
+- **MARKET** orders fetch the exact live real-time price instantly using Yahoo Finance (Dhan) or Kite Connect APIs.
 - **AMO** (After Market Orders) auto-detected: weekends + before 9:15 AM / after 3:15 PM IST
-- **Quantity**: 1 share (hardcoded — edit `place_order()` to customize)
+- **Quantity**: Automatically calculated based on `TRADE_AMOUNT_INR / Price`.
+- **Auto-Login**: Dhan token auto-refreshes seamlessly in the middle of a trade if a `401 Unauthorized` token expiry occurs!
 
 ## Auto-Reconnection
 

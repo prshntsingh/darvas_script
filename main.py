@@ -249,11 +249,12 @@ async def process_telegram_message(message, channel_id):
                             f"[*] AI Extracted -> Symbol: {symbol} | Price: {price_display}"
                         ))
                     
-                    # Inject latency metadata into the broadcast payload
+                    # Inject latency metadata and channel context into the broadcast payload
                     trade_signal["_latency_ms"] = {
                         "extraction": round(extract_ms, 2),
                         "source": source,
                     }
+                    trade_signal["channel_label"] = mapping.label
                     
                     await manager.broadcast(trade_signal)
                     t_broadcast = time.perf_counter_ns()

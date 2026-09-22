@@ -20,6 +20,7 @@ Intended to run on:
 import os
 import sys
 import io
+import math
 import csv
 import json
 import uuid
@@ -62,6 +63,16 @@ KITE_ACCESS_TOKEN = os.environ.get("KITE_ACCESS_TOKEN", "")
 # Dhan credentials
 DHAN_CLIENT_ID = os.environ.get("DHAN_CLIENT_ID", "")
 DHAN_ACCESS_TOKEN = os.environ.get("DHAN_ACCESS_TOKEN", "")
+DHAN_PIN = os.environ.get("DHAN_PIN", "")
+DHAN_TOTP_SECRET = os.environ.get("DHAN_TOTP_SECRET", "")
+
+# Execution filters
+_RAW_ALLOWED_CHANNELS = os.environ.get("ALLOWED_CHANNELS", "").strip()
+ALLOWED_CHANNELS = {c.strip().lower() for c in _RAW_ALLOWED_CHANNELS.split(",")} if _RAW_ALLOWED_CHANNELS else set()
+
+# Capital Allocation
+TRADE_AMOUNT_INR = int(os.environ.get("TRADE_AMOUNT_INR", "0"))
+DEFAULT_QUANTITY = int(os.environ.get("DEFAULT_QUANTITY", "1"))
 
 # Reconnection settings
 RECONNECT_BASE_DELAY = 1.0    # seconds
@@ -197,12 +208,39 @@ class ZerodhaBroker:
         # Map action to Kite transaction type
         transaction_type = "BUY" if action == "BUY" else "SELL"
 
+        # --- Capital Allocation & Quantity Calculation ---
+        # For Zerodha equity/F&O
+        quantity = DEFAULT_QUANTITY
+        if TRADE_AMOUNT_INR > 0:
+            if order_type == "LIMIT" and entry_price and entry_price > 0:
+                quantity = max(1, math.floor(TRADE_AMOUNT_INR / entry_price))
+            else:
+                # MARKET order - fetch live price (LTP) to calculate quantity
+                try:
+                    if self._kite is not None:
+                        quote_key = f"{exchange}:{tradingsymbol}"
+                        logger.info(f"Fetching live quote for {quote_key}...")
+                        t0 = time_mod.perf_counter()
+                        quote = self._kite.quote([quote_key])
+                        t1 = time_mod.perf_counter()
+                        
+                        ltp = quote.get(quote_key, {}).get("last_price", 0)
+                        if ltp and ltp > 0:
+                            quantity = max(1, math.floor(TRADE_AMOUNT_INR / ltp))
+                            logger.info(f"Fetched LTP: {ltp} in {(t1-t0)*1000:.1f}ms. Calculated QTY: {quantity}")
+                        else:
+                            logger.warning(f"Failed to extract LTP from quote {quote}. Using DEFAULT_QUANTITY.")
+                    else:
+                        logger.info("[DRY RUN] No kite client, using DEFAULT_QUANTITY.")
+                except Exception as e:
+                    logger.error(f"Failed to fetch live price via Kite: {e}. Using DEFAULT_QUANTITY.")
+
         # Build order params
         order_params = {
             "tradingsymbol": tradingsymbol,
             "exchange": exchange,
             "transaction_type": transaction_type,
-            "quantity": 1,  # Lot size — should be configurable per symbol
+            "quantity": quantity,
             "product": "MIS",  # Intraday — configurable
             "order_type": order_type,
             "validity": "DAY",
@@ -418,15 +456,53 @@ class DhanBroker:
 
     ORDERS_URL = "https://api.dhan.co/v2/orders"
 
-    def __init__(self, client_id: str, access_token: str, dry_run: bool = True):
+    def __init__(self, client_id: str, access_token: str, pin: str = "", totp_secret: str = "", dry_run: bool = True):
         self.client_id = client_id
         self.access_token = access_token
+        self.pin = pin
+        self.totp_secret = totp_secret
         self.dry_run = dry_run
         self._scrips = DhanScripMap()
 
     def connect(self):
-        """Download scrip master and prepare for order placement."""
+        """Authenticate (if needed) and prepare for order placement."""
+        if not self.access_token and self.pin and self.totp_secret:
+            success = self._auto_login()
+            if not success:
+                logger.error("Initial Dhan auto-login failed. Exiting.")
+                sys.exit(1)
+        
         self._scrips.load()
+
+    def _auto_login(self) -> bool:
+        """Programmatically generate Dhan access token using pyotp."""
+        try:
+            import pyotp
+            logger.info("Generating Dhan TOTP for auto-login...")
+            totp = pyotp.TOTP(self.totp_secret)
+            current_totp = totp.now()
+
+            url = f"https://auth.dhan.co/app/generateAccessToken?dhanClientId={self.client_id}&pin={self.pin}&totp={current_totp}"
+            response = requests.post(url, timeout=10)
+
+            if response.status_code == 200:
+                data = response.json()
+                if "accessToken" in data:
+                    self.access_token = data["accessToken"]
+                    logger.info("Successfully generated Dhan access token via auto-login!")
+                    return True
+                else:
+                    logger.error(f"Dhan auto-login failed: {data}")
+                    return False
+            else:
+                logger.error(f"Dhan auto-login HTTP {response.status_code}: {response.text}")
+                return False
+        except ImportError:
+            logger.error("pyotp is required for auto-login. Please run: pip install pyotp")
+            return False
+        except Exception as e:
+            logger.error(f"Dhan auto-login error: {e}")
+            return False
 
     def _build_headers(self) -> dict:
         return {
@@ -434,7 +510,7 @@ class DhanBroker:
             "access-token": self.access_token,
         }
 
-    def _place_dhan_order(self, payload: dict) -> dict | None:
+    def _place_dhan_order(self, payload: dict, is_retry: bool = False) -> dict | None:
         """Send an order to Dhan v2 API."""
         if self.dry_run:
             logger.info(f"[DRY RUN] Would send Dhan order: {json.dumps(payload, indent=2)}")
@@ -454,6 +530,21 @@ class DhanBroker:
                 order_status = result.get("orderStatus", "QUEUED")
                 logger.info(f"Dhan order placed. ID: {order_id}, Status: {order_status}")
                 return {"order_id": order_id, "status": order_status}
+            
+            # --- 24/7 Self-Healing Auth ---
+            # If token expired (401 Unauthorized or similar), auto-refresh and retry once.
+            elif response.status_code in (401, 403) or "unauthorized" in str(result).lower():
+                if not is_retry and self.pin and self.totp_secret:
+                    logger.warning(f"Dhan token expired (HTTP {response.status_code}). Triggering mid-trade auto-login...")
+                    if self._auto_login():
+                        logger.info("Auto-login succeeded! Retrying order...")
+                        return self._place_dhan_order(payload, is_retry=True)
+                    else:
+                        logger.error("Mid-trade auto-login failed. Order aborted.")
+                
+                logger.error(f"Dhan order rejected (Unauthorized): {result}")
+                return {"status": "REJECTED_UNAUTHORIZED", "response": result}
+
             else:
                 logger.error(f"Dhan order rejected: {result}")
                 return {"status": "REJECTED", "response": result}
@@ -499,6 +590,37 @@ class DhanBroker:
             order_type = "MARKET"
             price = 0.0
 
+        # --- Capital Allocation & Quantity Calculation ---
+        quantity = DEFAULT_QUANTITY
+        if TRADE_AMOUNT_INR > 0:
+            if order_type == "LIMIT" and entry_price > 0:
+                quantity = max(1, math.floor(TRADE_AMOUNT_INR / entry_price))
+            else:
+                # MARKET order - fetch live price from Yahoo Finance
+                try:
+                    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_symbol}.NS?interval=1d&range=1d"
+                    headers = {"User-Agent": "Mozilla/5.0"}
+                    logger.info(f"Fetching live quote from Yahoo Finance for {stock_symbol}.NS...")
+                    t0 = time_mod.perf_counter()
+                    resp = requests.get(url, headers=headers, timeout=5)
+                    t1 = time_mod.perf_counter()
+                    
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        ltp = data.get("chart", {}).get("result", [{}])[0].get("meta", {}).get("regularMarketPrice", 0)
+                        if ltp and ltp > 0:
+                            quantity = max(1, math.floor(TRADE_AMOUNT_INR / ltp))
+                            logger.info(f"Fetched LTP: {ltp} in {(t1-t0)*1000:.1f}ms. Calculated QTY: {quantity}")
+                        else:
+                            quantity = max(1, DEFAULT_QUANTITY)
+                            logger.warning(f"LTP not found in YF response. Using DEFAULT_QUANTITY: {quantity}")
+                    else:
+                        quantity = max(1, DEFAULT_QUANTITY)
+                        logger.warning(f"YF returned {resp.status_code}. Using DEFAULT_QUANTITY: {quantity}")
+                except Exception as e:
+                    quantity = max(1, DEFAULT_QUANTITY)
+                    logger.error(f"Failed to fetch live price via YF: {e}. Using DEFAULT_QUANTITY: {quantity}")
+
         payload = {
             "dhanClientId": self.client_id,
             "correlationId": str(uuid.uuid4())[:30],
@@ -508,7 +630,7 @@ class DhanBroker:
             "orderType": order_type,
             "validity": "DAY",
             "securityId": str(scrip_id),
-            "quantity": 1,  # Hardcoded for equity — configurable per symbol later
+            "quantity": quantity,
             "price": price,
             "disclosedQuantity": 0,
             "triggerPrice": 0.0,
@@ -523,7 +645,7 @@ class DhanBroker:
 
         logger.info(
             f"Executing → Symbol: {stock_symbol} | Segment: {segment} "
-            f"| QTY: 1 | Type: {order_type} | Price: {price}"
+            f"| QTY: {quantity} | Type: {order_type} | Price: {price}"
         )
 
         return self._place_dhan_order(payload)
@@ -546,12 +668,19 @@ def _create_broker(dry_run: bool):
     Returns a broker instance with a .handle_signal(signal) method.
     """
     if BROKER == "dhan":
-        if not DHAN_CLIENT_ID or not DHAN_ACCESS_TOKEN:
-            logger.error("Dhan credentials missing. Set DHAN_CLIENT_ID and DHAN_ACCESS_TOKEN.")
+        if not DHAN_CLIENT_ID:
+            logger.error("Dhan credentials missing. Set DHAN_CLIENT_ID.")
             sys.exit(1)
+            
+        if not DHAN_ACCESS_TOKEN and not (DHAN_PIN and DHAN_TOTP_SECRET):
+            logger.error("Dhan token missing and no auto-login credentials (DHAN_PIN, DHAN_TOTP_SECRET) found.")
+            sys.exit(1)
+            
         broker = DhanBroker(
             client_id=DHAN_CLIENT_ID,
             access_token=DHAN_ACCESS_TOKEN,
+            pin=DHAN_PIN,
+            totp_secret=DHAN_TOTP_SECRET,
             dry_run=dry_run,
         )
         broker.connect()
@@ -613,11 +742,18 @@ async def connect_and_listen():
                     try:
                         t_recv = time_mod.perf_counter()
                         signal = json.loads(raw_message)
+                        # Filter by channel if ALLOWED_CHANNELS is configured
+                        channel_label = signal.get("channel_label", "").lower()
+                        if ALLOWED_CHANNELS and channel_label not in ALLOWED_CHANNELS:
+                            logger.info(f"Skipping signal from channel '{channel_label}' (not in ALLOWED_CHANNELS)")
+                            continue
+
                         logger.info(
                             f"Received signal: {signal.get('stock_symbol')} "
                             f"@ {signal.get('entry_price', 'MARKET')} "
                             f"({signal.get('order_type', 'MARKET')}) "
-                            f"via {signal.get('source', '?')}"
+                            f"via {signal.get('source', '?')} "
+                            f"[Channel: {channel_label}]"
                         )
 
                         # Log server-side latency if available
