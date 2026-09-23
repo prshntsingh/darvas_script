@@ -1,5 +1,5 @@
 # systemd unit for the equity execution client (client_agent/client.py).
-# Installed by deploy/setup_vm.sh, which fills in YOUR_USER and the repo path. Control it with ./bot.
+# Installed by client_agent/deploy/setup.sh, which fills in YOUR_USER and the repo path. Control it with `bot`.
 [Unit]
 Description=Equity trading signal execution client
 After=network-online.target

@@ -52,20 +52,13 @@ The equity client (`client_agent/`) ignores FNO signals, so both can run side by
 - **Dhan**: set `DHAN_PIN` and `DHAN_TOTP_SECRET`. The agent logs in with TOTP at 08:00 IST and again whenever it gets a 401.
 - **Kite**: a manual login is needed every day. Run `python -m fno_agent.kite_login fno_agent/.env` after 07:30 IST. The agent reloads the token file at 08:00 and whenever a token error occurs, so no restart is needed.
 
-## Running 24/7 on the VM
-Follow the simple guide in `client_agent/README.md` → "Running 24/7 on GCP (simple guide)". The same `bash deploy/setup_vm.sh` sets up both bots; answer **Y** to "Run the OPTIONS (FnO) bot?". Then use `bot status`, `bot today fno`, `bot logs fno`, and `bot live fno` / `bot test fno`.
+## Deploying (Railway broadcaster + VM)
 
-- The agent refreshes its Dhan login (08:00 IST) and instrument list (08:30 IST) by itself, so it needs no daily restart.
-- Logs: `bot logs fno`, and also `fno_agent/logs/fno_agent.log` (rotating).
-- Update `holidays.json` every year from the NSE holiday list.
-- If you set up Telegram alerts and there's no 09:00 heartbeat on a weekday, run `bot status`.
-
-## Before going live
-1. Run with `DRY_RUN=true` and check the logged payloads and Telegram messages for a few real signals.
-2. Set `FNO_MAX_LOTS=1` and a small budget (`bot settings fno`), then `bot live fno`. Let one trade run and confirm in the broker app that:
-   - **Dhan**: the super order shows target and SL legs on the `MARGIN` product.
-   - **Kite**: the GTT OCO appears under GTT.
-3. Then raise the limits.
+See **[DEPLOY.md](DEPLOY.md)**. It covers:
+- the separate FnO broadcaster on Railway
+- the one-command setup of this bot on the VM (`bash fno_agent/deploy/setup.sh`)
+- everyday `bot` commands
+- the safe path to going live
 
 Useful journal queries:
 ```bash

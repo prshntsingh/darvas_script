@@ -1,5 +1,5 @@
 # systemd unit for the FnO agent.
-# Installed by deploy/setup_vm.sh, which fills in YOUR_USER and the repo path. Control it with ./bot.
+# Installed by fno_agent/deploy/setup.sh, which fills in YOUR_USER and the repo path. Control it with `bot`.
 [Unit]
 Description=FnO signal execution agent
 After=network-online.target

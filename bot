@@ -21,8 +21,9 @@ Trading bots — commands
   bot stop  [equity|fno]     Stop a bot
   bot start [equity|fno]     Start a bot again
 
-  bot settings equity|fno    Change settings (opens the settings file, restarts after)
-  bot setup                  Re-run the guided setup (keeps your current answers)
+  bot settings equity|fno    Change any setting (opens the settings file, restarts after)
+  bot setup equity|fno       Re-run the guided setup for one bot (keeps your answers)
+  bot setup                  Guided setup for both bots
   bot update                 Download the latest version and restart
 
 Leave out equity|fno to act on every installed bot.
@@ -39,7 +40,7 @@ bots_for() {
     esac
     for b in $list; do
         if is_installed "$b"; then echo "$b"
-        elif [ "${1:-all}" != all ]; then fail "$(label_of "$b") is not set up. Run: bot setup"; exit 1
+        elif [ "${1:-all}" != all ]; then fail "$(label_of "$b") is not set up. Run: bot setup $b"; exit 1
         fi
     done
 }
@@ -56,10 +57,10 @@ status() {
         elif systemctl is-enabled -q "$svc" 2>/dev/null; then
             fail "$(label_of "$b"): NOT RUNNING. Try: bot restart $b   then: bot logs $b"
         else
-            warn "$(label_of "$b"): switched off (not selected in setup)"
+            warn "$(label_of "$b"): switched off. To turn it on: bot setup $b"
         fi
     done
-    [ $any = 1 ] || warn "No bots set up yet. Run: bash deploy/setup_vm.sh"
+    [ $any = 1 ] || warn "No bots set up yet. Run: bash client_agent/deploy/setup.sh  or  bash fno_agent/deploy/setup.sh"
     if systemctl is-enabled -q trading-client-restart.timer 2>/dev/null; then
         echo "  Equity bot daily fresh start: $(systemctl show -p NextElapseUSecRealtime --value trading-client-restart.timer)"
     fi
@@ -131,7 +132,11 @@ case "$CMD" in
     live|test) need_bot "${1:-}"; set_mode "$CMD" "$1" ;;
     restart|stop|start) bots_for "${1:-all}" >/dev/null; svc_action "$CMD" "${1:-all}" ;;
     settings) need_bot "${1:-}"; settings "$1" ;;
-    setup)    bash "$REPO_DIR/deploy/setup_vm.sh" ;;
+    setup)    case "${1:-}" in
+                  equity|fno) bash "$(setup_of "$1")" ;;
+                  "") bash "$REPO_DIR/deploy/setup_vm.sh" ;;
+                  *) fail "Unknown bot '$1'. Use: bot setup equity   or   bot setup fno"; exit 1 ;;
+              esac ;;
     update)   update ;;
     help|-h|--help) usage ;;
     *) fail "Unknown command '$CMD'"; echo; usage; exit 1 ;;
