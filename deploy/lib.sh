@@ -110,14 +110,58 @@ system_setup() {
     ok "VM ready (timezone: India, Python libraries installed, 'bot' command available)"
 }
 
+# ask_server LABEL ENV_FILE  -> sets WS_URL / WS_TOKEN and saves them
+# Accepts an address pasted with "?token=..." and moves the token into the password setting.
+ask_server() {
+    local label=$1 env=$2 url_token
+    while true; do
+        ask_required WS_URL "$label server address (starts with wss://, ends with /ws)" "$(get_env WS_SERVER_URL "$env")"
+        WS_URL=$(printf '%s' "$WS_URL" | tr -d '[:space:]')
+        case "$WS_URL" in ws://*|wss://*) break ;; esac
+        warn "The address must start with wss:// (e.g. wss://your-app.up.railway.app/ws)."
+    done
+    url_token=$(printf '%s' "$WS_URL" | sed -nE 's/.*[?&]token=([^&]*).*/\1/p')
+    WS_URL=$(printf '%s' "$WS_URL" | sed -E 's/[?&]token=[^&]*//; s/&$//')
+    if [ -n "$url_token" ]; then
+        ok "Moved the password out of the address (it belongs in the password question)."
+    fi
+    ask WS_TOKEN "$label server password (its WS_AUTH_TOKEN)" "$(first_set "$url_token" "$(get_env WS_AUTH_TOKEN "$env")")" secret
+    set_env WS_SERVER_URL "$WS_URL" "$env"
+    set_env WS_AUTH_TOKEN "$WS_TOKEN" "$env"
+}
+
+# clean_totp SECRET -> without spaces/dashes, upper-case (authenticator apps show it as "ABCD EFGH ...")
+clean_totp() { printf '%s' "$1" | tr -d '[:space:]-' | tr '[:lower:]' '[:upper:]'; }
+
+# valid_totp SECRET -> true if it is a base32 TOTP secret (A-Z, 2-7), not a 6-digit code or PIN
+valid_totp() {
+    python3 - "$1" <<'PY'
+import base64, sys
+s = sys.argv[1]
+try:
+    base64.b32decode(s + "=" * (-len(s) % 8))
+except Exception:
+    sys.exit(1)
+sys.exit(0 if len(s) >= 16 else 1)
+PY
+}
+
 # ask_dhan ENV_FILE OTHER_ENV_FILE  (defaults from this agent's .env, else the other agent's)
 ask_dhan() {
-    local own=$1 other=$2
+    local own=$1 other=$2 totp_default
     echo " Dhan account (Dhan web → My Profile → DhanHQ Trading APIs):"
     ask_required DHAN_ID   "Dhan Client ID" "$(first_set "$(get_env DHAN_CLIENT_ID "$own")" "$(get_env DHAN_CLIENT_ID "$other")")"
     ask_required DHAN_PIN  "Dhan login PIN" "$(first_set "$(get_env DHAN_PIN "$own")" "$(get_env DHAN_PIN "$other")")" secret
-    ask_required DHAN_TOTP "Dhan TOTP secret (the long code shown when you enabled TOTP)" \
-        "$(first_set "$(get_env DHAN_TOTP_SECRET "$own")" "$(get_env DHAN_TOTP_SECRET "$other")")" secret
+    totp_default=$(clean_totp "$(first_set "$(get_env DHAN_TOTP_SECRET "$own")" "$(get_env DHAN_TOTP_SECRET "$other")")")
+    valid_totp "$totp_default" || totp_default=""   # never offer a broken saved value as the default
+    while true; do
+        ask_required DHAN_TOTP "Dhan TOTP secret (the long code of letters shown when you enabled TOTP)" "$totp_default" secret
+        DHAN_TOTP=$(clean_totp "$DHAN_TOTP")
+        valid_totp "$DHAN_TOTP" && break
+        warn "That is not the TOTP secret. It is a long code of letters A-Z and digits 2-7,"
+        warn "e.g. JBSWY3DPEHPK3PXP — NOT the 6-digit code from the authenticator app, and not the PIN."
+        warn "In Dhan: DhanHQ Trading APIs → TOTP → the setup key / secret shown under the QR code."
+    done
     set_env BROKER dhan "$own"
     set_env DHAN_CLIENT_ID "$DHAN_ID" "$own"
     set_env DHAN_ACCESS_TOKEN "" "$own"   # blank = log in automatically with PIN + TOTP

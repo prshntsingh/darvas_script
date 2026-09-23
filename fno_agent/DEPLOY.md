@@ -103,6 +103,7 @@ The bot starts in **TEST mode**: it receives option signals and shows the contra
 |---|---|
 | `NOT RUNNING` in `bot status` | `bot restart fno`, then `bot logs fno` |
 | Setup says "did not connect" | Wrong options server address or password: `bot setup fno`. Also check the FnO broadcaster's `/health` |
+| `Non-base32 digit found` | The Dhan **TOTP secret** is wrong: it must be the long code of letters (A–Z, 2–7) shown under the QR code when you enabled TOTP, not the 6-digit code from the app and not the PIN. Run `bot setup fno` and paste it again (spaces are fine) |
 | `Skipped … budget` | One lot costs more than your per-trade rupees. Raise `FNO_CAPITAL_PER_TRADE` (`bot settings fno`) |
 | `Skipped … missed entry` | The price had already moved more than 3% above the entry range. This is intended |
 | `Skipped … contract not found` | The strike or month in the message doesn't exist on the exchange. Nothing was bought |

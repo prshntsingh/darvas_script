@@ -93,6 +93,7 @@ The bot starts in **TEST mode**: it receives signals and shows what it *would* b
 |---|---|
 | `NOT RUNNING` in `bot status` | `bot restart equity`, then `bot logs equity` |
 | Setup says "did not connect" | Wrong server address or password: `bot setup equity`. Also check the broadcaster's `/health` page |
+| `Non-base32 digit found` | The Dhan **TOTP secret** is wrong: it must be the long code of letters (A–Z, 2–7) shown under the QR code when you enabled TOTP, not the 6-digit code from the app and not the PIN. Run `bot setup equity` and paste it again (spaces are fine) |
 | `Initial Dhan auto-login failed` | Wrong Dhan PIN or TOTP secret: `bot setup equity` |
 | Orders rejected for IP | Run `curl -s ifconfig.me` on the VM. That IP must be whitelisted in Dhan |
 | `Scrip not found for 'XYZ'` | The signal's symbol isn't a valid NSE/BSE ticker. Nothing was bought |

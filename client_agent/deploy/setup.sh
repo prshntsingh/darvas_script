@@ -21,10 +21,7 @@ chmod 600 "$ENV"
 
 echo
 echo " EQUITY signal server (the Railway broadcaster for share signals — not the options one):"
-ask_required WS_URL "Equity server address (starts with wss://, ends with /ws)" "$(get_env WS_SERVER_URL "$ENV")"
-ask WS_TOKEN "Equity server password (its WS_AUTH_TOKEN)" "$(get_env WS_AUTH_TOKEN "$ENV")" secret
-set_env WS_SERVER_URL "$WS_URL" "$ENV"
-set_env WS_AUTH_TOKEN "$WS_TOKEN" "$ENV"
+ask_server Equity "$ENV"
 
 echo
 ask_dhan "$ENV" "$OTHER"

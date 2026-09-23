@@ -24,10 +24,7 @@ chmod 600 "$ENV"
 
 echo
 echo " OPTIONS signal server (the Railway broadcaster for option signals — not the equity one):"
-ask_required WS_URL "Options server address (starts with wss://, ends with /ws)" "$(get_env WS_SERVER_URL "$ENV")"
-ask WS_TOKEN "Options server password (its WS_AUTH_TOKEN)" "$(get_env WS_AUTH_TOKEN "$ENV")" secret
-set_env WS_SERVER_URL "$WS_URL" "$ENV"
-set_env WS_AUTH_TOKEN "$WS_TOKEN" "$ENV"
+ask_server Options "$ENV"
 if [ "$WS_URL" = "$(get_env WS_SERVER_URL "$OTHER")" ]; then
     warn "This is the same address the equity bot uses. That's fine only if one server sends both kinds of signals."
 fi

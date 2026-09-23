@@ -448,3 +448,10 @@ def test_channel_without_fno_flag_behaves_exactly_as_before(pipeline):
     rec = pipeline(POLYCAB, enable_fno=False)
     assert rec.fno_calls == []
     assert rec.broadcasts == []  # equity filter blocks it, as it always did
+
+
+def test_dhan_totp_secret_is_normalized():
+    """Authenticator apps show the secret as 'ABCD EFGH ...'; pyotp rejects spaces/dashes ("Non-base32 digit")."""
+    from fno_agent.brokers.dhan import DhanFnOBroker
+
+    assert DhanFnOBroker("1", totp_secret=" jbsw y3dp-ehpk 3pxp ").totp_secret == "JBSWY3DPEHPK3PXP"

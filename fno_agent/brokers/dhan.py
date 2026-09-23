@@ -47,7 +47,8 @@ class DhanFnOBroker(FnOBroker):
         self.client_id = client_id
         self.access_token = access_token
         self.pin = pin
-        self.totp_secret = totp_secret
+        # Authenticator apps display the secret as "ABCD EFGH ..."; pyotp needs it without spaces/dashes
+        self.totp_secret = "".join(totp_secret.split()).replace("-", "").upper()
 
     # --- auth -------------------------------------------------------------
 
