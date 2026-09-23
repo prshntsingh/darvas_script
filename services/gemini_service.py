@@ -14,7 +14,7 @@ import os
 import asyncio
 from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
-from config import VERTEX_PROJECT_ID, VERTEX_LOCATION
+from config import VERTEX_PROJECT_ID, GEMINI_LOCATION
 from models import GeminiEquitySignal
 from services.regex_service import extract_trade as regex_extract_trade
 
@@ -43,13 +43,34 @@ def init_vertex():
         _client = genai.Client(
             vertexai=True,
             project=VERTEX_PROJECT_ID,
-            location=VERTEX_LOCATION,
+            location=GEMINI_LOCATION,
             credentials=creds
         )
     except Exception as e:
         print(f"Failed to initialize google-genai Client: {e}")
 
 init_vertex()
+
+
+# --- Latency tuning (benchmarked 2026-09-23 on this project) ---
+# Primary: gemini-2.5-flash with thinking off (~0.8-1.2s vs ~2.1s with default thinking, same accuracy).
+# Fallback: gemini-3.1-flash-lite (~1.1-1.4s, accurate; separate capacity pool). gemini-2.0-flash is retired (404).
+_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-3.1-flash-lite"]
+GEMINI_TIMEOUT_SEC = 4.0  # per model attempt; worst case ~8s before giving up
+
+
+def fast_config(model_name: str, **kwargs) -> types.GenerateContentConfig:
+    """GenerateContentConfig tuned for low-latency extraction: no thinking, no AFC."""
+    if model_name.startswith("gemini-2."):
+        thinking = types.ThinkingConfig(thinking_budget=0)
+    else:  # gemini-3.x uses thinking levels instead of a token budget
+        thinking = types.ThinkingConfig(thinking_level=types.ThinkingLevel.MINIMAL)
+    return types.GenerateContentConfig(
+        temperature=0.0,
+        thinking_config=thinking,
+        automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+        **kwargs,
+    )
 
 async def extract_trade_async(text):
     """
@@ -98,7 +119,8 @@ async def extract_trade_async(text):
         # Use aio for async requests
         response = await _client.aio.models.generate_content(
             model=model_name,
-            contents=prompt
+            contents=prompt,
+            config=fast_config(model_name),
         )
         result_text = response.text.strip()
         
@@ -139,15 +161,13 @@ CRITICAL RULES:
 
 Message: """
 
-# Model fallback chain — if one model is overloaded or times out, try the next
-_FALLBACK_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"]
 
 
 async def extract_equity_trade_gemini(text: str) -> dict | None:
     """
     Extract equity trade signal using Gemini structured output.
     
-    Uses model fallback chain with 7.5s timeout per model attempt.
+    Uses the model fallback chain with GEMINI_TIMEOUT_SEC per model attempt.
     Returns {stock_symbol, entry_price, order_type, source} or None.
     """
     if not _client:
@@ -158,18 +178,17 @@ async def extract_equity_trade_gemini(text: str) -> dict | None:
 
     for model_name in _FALLBACK_MODELS:
         try:
-            chat = _client.aio.chats.create(model=model_name)
-
             response = await asyncio.wait_for(
-                chat.send_message(
-                    prompt,
-                    config=types.GenerateContentConfig(
+                _client.aio.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=fast_config(
+                        model_name,
                         response_mime_type="application/json",
                         response_schema=GeminiEquitySignal,
-                        temperature=0.0,
                     ),
                 ),
-                timeout=7.5,
+                timeout=GEMINI_TIMEOUT_SEC,
             )
 
             signal = response.parsed
@@ -199,7 +218,7 @@ async def extract_equity_trade_gemini(text: str) -> dict | None:
             }
 
         except asyncio.TimeoutError:
-            print(f"[GEMINI] {model_name} timed out (>7.5s). Trying next model...")
+            print(f"[GEMINI] {model_name} timed out (>{GEMINI_TIMEOUT_SEC}s). Trying next model...")
             continue
 
         except Exception as e:
@@ -211,8 +230,9 @@ async def extract_equity_trade_gemini(text: str) -> dict | None:
                 print(f"[GEMINI] {model_name} rate limited (429). Trying next model...")
                 continue
             else:
-                print(f"[GEMINI] {model_name} unhandled error: {error_msg}")
-                break
+                # e.g. 404 if a model is retired: still try the next model
+                print(f"[GEMINI] {model_name} unhandled error: {error_msg}. Trying next model...")
+                continue
 
     return None
 

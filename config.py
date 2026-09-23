@@ -40,7 +40,10 @@ DISCORD_WEBHOOK_URL = os.environ.get('DISCORD_WEBHOOK_URL', '')
 
 # Vertex AI Configuration
 VERTEX_PROJECT_ID = os.environ.get('VERTEX_PROJECT_ID', '')
-VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')
+VERTEX_LOCATION = os.environ.get('VERTEX_LOCATION', 'us-central1')  # legacy; Gemini uses GEMINI_LOCATION
+# Gemini endpoint. 'global' serves every current Flash model (incl. the gemini-3.x fallback, which
+# 404s in us-central1) and routes to available capacity. Override only if you need data residency.
+GEMINI_LOCATION = os.environ.get('GEMINI_LOCATION', 'global')
 
 # Google Sheets Configuration
 GOOGLE_SHEET_ID = os.environ.get('GOOGLE_SHEET_ID', '')

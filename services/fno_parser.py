@@ -179,16 +179,12 @@ If a single entry price is given, set entry_min = entry_max = that price.
 Message:
 """
 
-GEMINI_TIMEOUT_SEC = 7.5
-
-
 async def parse_fno_gemini(text: str) -> Optional[FnOSignal]:
     """Gemini fallback, gated by a cheap option-keyword check. Returns a validated FnOSignal or None."""
     if not text or is_exit_message(text) or not looks_like_option(text):
         return None
 
     # Imported lazily: gemini_service initialises Vertex at import time
-    from google.genai import types
     from services import gemini_service
 
     client = gemini_service._client
@@ -202,13 +198,13 @@ async def parse_fno_gemini(text: str) -> Optional[FnOSignal]:
                 client.aio.models.generate_content(
                     model=model_name,
                     contents=_FNO_PROMPT + text,
-                    config=types.GenerateContentConfig(
+                    config=gemini_service.fast_config(
+                        model_name,
                         response_mime_type="application/json",
                         response_schema=GeminiFnOSignal,
-                        temperature=0.0,
                     ),
                 ),
-                timeout=GEMINI_TIMEOUT_SEC,
+                timeout=gemini_service.GEMINI_TIMEOUT_SEC,
             )
             g = response.parsed
             if not g or not g.is_option_buy_entry:
