@@ -17,7 +17,7 @@ trading bot logic:
 
 import re
 from typing import Optional
-from services.scrip_service import VALID_EQUITY_SYMBOLS
+from services.scrip_service import VALID_EQUITY_SYMBOLS, normalize_name, resolve_company_name
 
 # --- Pre-compiled Patterns (executed once at import time) ---
 
@@ -29,6 +29,19 @@ _ACTION_SYMBOL_PATTERN = re.compile(
     r'(?:buy|bought|added)\s+(?:in\s+)?(?:#\s*)?([a-zA-Z]+)',
     re.IGNORECASE,
 )
+
+# Same anchors, but capture up to 6 words on that line, for company names: "Bought\nMANIPAL PAYMENT"
+_WORD = r"[A-Za-z&][A-Za-z&.\-]*"
+_HASHTAG_PHRASE_PATTERN = re.compile(r'#\s*(' + _WORD + r'(?:[ \t]+' + _WORD + r'){0,5})')
+_ACTION_PHRASE_PATTERN = re.compile(
+    r'(?:buy|bought|added)\s+(?:in\s+)?(?:#\s*)?(' + _WORD + r'(?:[ \t]+' + _WORD + r'){0,5})',
+    re.IGNORECASE,
+)
+# Words that end a company-name phrase ("Bought Manipal Payment at 450 for positional")
+_PHRASE_STOP_WORDS = frozenset({
+    "AT", "CMP", "SL", "TARGET", "TGT", "ENTRY", "FOR", "NOW", "TODAY", "ABOVE", "BELOW",
+    "AROUND", "NEAR", "RS", "WITH", "ON", "IN", "QTY", "LEVELS", "LEVEL", "ZONE",
+})
 
 # Entry price: "@ 120", "at Rs. 2500", "CMP 120", "at: 500"
 _PRICE_PATTERN = re.compile(
@@ -120,6 +133,23 @@ def filter_message(text: str) -> str | None:
     return None  # Message passes all filters
 
 
+def _phrase_tokens(phrase: str, skip_noise: bool) -> list:
+    """Words of a candidate company-name phrase: optional leading noise dropped, cut at the first stop word."""
+    tokens = phrase.split()
+    if skip_noise:
+        while tokens and tokens[0].upper() in _NOISE_WORDS:
+            tokens.pop(0)
+    for i, tok in enumerate(tokens):
+        if tok.upper().strip(".-") in _PHRASE_STOP_WORDS:
+            return tokens[:i]
+    return tokens
+
+
+def _resolve_by_name(tokens: list) -> Optional[str]:
+    """Company-name lookup ('MANIPAL PAYMENT' -> 'MPIMANIPAL'); None if unknown or ambiguous."""
+    return resolve_company_name(normalize_name(" ".join(tokens))) if tokens else None
+
+
 def extract_trade(text: str) -> Optional[dict]:
     """
     Attempt to extract an equity trade signal from raw text using deterministic regex.
@@ -142,6 +172,11 @@ def extract_trade(text: str) -> Optional[dict]:
         (h.upper() for h in all_hashtags if h.upper() not in META_TAGS),
         None,
     )
+    phrase = []
+    if candidate:
+        phrase_match = next((m for m in _HASHTAG_PHRASE_PATTERN.finditer(text)
+                             if m.group(1).split()[0].upper().startswith(candidate)), None)
+        phrase = _phrase_tokens(phrase_match.group(1), skip_noise=False) if phrase_match else []
 
     # --- Stage 2: Action pattern fallback ---
     if not candidate:
@@ -150,13 +185,17 @@ def extract_trade(text: str) -> Optional[dict]:
             symbol = action_match.group(1).upper()
             if symbol not in _NOISE_WORDS:
                 candidate = symbol
-
-    if not candidate:
-        return None
+        phrase_match = _ACTION_PHRASE_PATTERN.search(text)
+        if phrase_match:
+            # "Added more Manipal Payment": skip leading filler words for the name lookup
+            phrase = _phrase_tokens(phrase_match.group(1), skip_noise=True)
 
     # --- Validate against Scrip Master (if loaded) ---
     if VALID_EQUITY_SYMBOLS and candidate not in VALID_EQUITY_SYMBOLS:
-        # Candidate is not a known equity symbol, fallback to AI
+        # Not a ticker: try the company name ("MANIPAL PAYMENT" -> MPIMANIPAL), else fallback to AI
+        candidate = _resolve_by_name(phrase)
+
+    if not candidate:
         return None
 
     # --- Extract entry price ---
