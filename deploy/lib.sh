@@ -89,7 +89,9 @@ ask_required() {
 # system_setup REQUIREMENTS_FILE...  (idempotent: fast when already done)
 system_setup() {
     bold "Preparing the VM (first time takes a minute)..."
-    if ! command -v git >/dev/null || ! python3 -m venv --help >/dev/null 2>&1 || ! command -v nano >/dev/null; then
+    # Debian/Ubuntu ship the venv module without ensurepip until python3-venv is installed,
+    # so test for ensurepip (what `python3 -m venv` actually needs), not just venv.
+    if ! command -v git >/dev/null || ! python3 -c "import ensurepip" >/dev/null 2>&1 || ! command -v nano >/dev/null; then
         sudo apt-get update -qq
         sudo apt-get install -y -qq git python3-venv python3-pip nano >/dev/null
     fi
@@ -135,7 +137,13 @@ start_and_check() {
     sudo systemctl restart "$svc"
     for _ in $(seq "$2"); do
         # grep without -q: reading all input avoids SIGPIPE false negatives under pipefail
-        if sudo journalctl -u "$svc" --since "$since" --no-pager 2>/dev/null | grep -F "Connected to broadcaster" >/dev/null; then
+        local log; log=$(sudo journalctl -u "$svc" --since "$since" --no-pager 2>/dev/null)
+        if grep -F "Connected to broadcaster" <<<"$log" >/dev/null; then
+            # The FnO agent keeps running (and connects) even when the Dhan login fails: surface it
+            if grep -E "login failed|Broker connect failed|BROKER AUTH FAILED" <<<"$log" >/dev/null; then
+                fail "$(label_of "$1") connected to the server, but the Dhan LOGIN FAILED. Check the Dhan PIN / TOTP secret."
+                return 1
+            fi
             ok "$(label_of "$1") is running and connected — $(mode_of "$1")"
             return 0
         fi

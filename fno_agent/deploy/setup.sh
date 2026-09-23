@@ -16,7 +16,10 @@ echo "Press Enter to keep the value shown in [brackets]. Secret answers stay inv
 echo
 
 system_setup fno_agent/requirements.txt
-[ -f "$ENV" ] || cp fno_agent/.env.example "$ENV"
+if [ ! -f "$ENV" ]; then
+    cp fno_agent/.env.example "$ENV"
+    set_env FNO_MAX_LOTS 1 "$ENV"   # first setup: suggest 1 lot until the first live trade is checked
+fi
 chmod 600 "$ENV"
 
 echo
@@ -34,7 +37,7 @@ ask_dhan "$ENV" "$OTHER"
 
 echo
 ask_required AMOUNT "Rupees to use per option trade (the bot buys as many whole lots as fit)" "$(get_env FNO_CAPITAL_PER_TRADE "$ENV")"
-ask MAXLOTS "Maximum lots per trade (0 = no limit; 1 is safest while testing)" "$(x=$(get_env FNO_MAX_LOTS "$ENV"); echo "${x:-1}")"
+ask MAXLOTS "Maximum lots per trade (0 = no limit; 1 is safest while testing)" "$(x=$(get_env FNO_MAX_LOTS "$ENV"); echo "${x:-0}")"
 echo "  Optional: trade alerts on Telegram (press Enter to skip)."
 ask TG_TOKEN "Telegram bot token (from @BotFather)" "$(get_env FNO_TG_BOT_TOKEN "$ENV")" secret
 ask TG_CHAT  "Telegram chat id (from @userinfobot)"  "$(get_env FNO_TG_CHAT_ID "$ENV")"
