@@ -162,6 +162,9 @@ The client receives JSON signals via WebSocket:
   "source": "REGEX",
   "raw_text": "Buy #SBIN @ 850",
   "timestamp": "2026-09-20 12:36:23",
+  "channel_label": "premium",
+  "asset_class": "EQUITY",
+  "signal_id": "-1001234567890:4521",
   "_latency_ms": {
     "extraction": 0.3,
     "source": "REGEX",
@@ -177,6 +180,8 @@ The client receives JSON signals via WebSocket:
 | `entry_price` | Entry price. `0` = MARKET order |
 | `order_type` | `MARKET` or `LIMIT` |
 | `source` | `REGEX` (fast-path, <1ms) or `GEMINI` (AI fallback) |
+| `asset_class` | `EQUITY` (handled here) or `FNO` (ignored here; handled by `fno_agent`) |
+| `signal_id` | `<telegram_channel_id>:<message_id>`, unique per Telegram message |
 
 ## Order Logic
 
@@ -195,47 +200,80 @@ The client automatically reconnects if the WebSocket connection drops:
 - Resets to 1s on successful reconnection
 - Graceful shutdown via Ctrl+C
 
-## Running 24/7 on GCP
+## Running 24/7 on GCP (simple guide)
 
-```bash
-# Install tmux/screen for persistent sessions
-sudo apt install tmux
+You only type a few commands. A setup script asks you questions and handles the rest. Once it's set up, the bots:
+- start by themselves when the VM starts
+- restart by themselves if they crash
+- log in to Dhan by themselves every morning
 
-# Start a tmux session
-tmux new -s trading
+### Before you start, keep these ready
+- **Server address** and **server password**. Ask whoever runs the Railway server. The address looks like `wss://something.up.railway.app/ws`.
+- **Dhan Client ID**, **Dhan login PIN** and **Dhan TOTP secret**. The TOTP secret is the long code Dhan shows when you turn on TOTP under *DhanHQ Trading APIs*.
+- How many **rupees per trade** you want each bot to use.
+- The VM's **static IP must be whitelisted in Dhan**. This is a one-time step; see "Step 1" and "Step 2" at the top of this page.
 
-# Run the client
-cd client_agent
-python client.py
+### One-time setup (about 5 minutes)
 
-# Detach: Ctrl+B, then D
-# Reattach: tmux attach -t trading
-```
+1. Open the Google Cloud Console → **Compute Engine → VM instances**. Click **SSH** next to your VM. A black terminal window opens.
+2. Copy and paste this line, then press Enter:
+   ```bash
+   git clone https://github.com/prshntsingh/darvas_script.git ~/darvas_script && cd ~/darvas_script && bash deploy/setup_vm.sh
+   ```
+   If the folder `~/darvas_script` already exists, use this instead:
+   ```bash
+   cd ~/darvas_script && git pull && bash deploy/setup_vm.sh
+   ```
+3. Answer the questions. Type your answer and press Enter. Secret answers (PIN, passwords) stay invisible while you type; that's normal. To keep the value shown in `[brackets]`, just press Enter.
+4. At the end you should see green ✔ lines saying each bot is **running and connected**, in **TEST mode**.
 
-Or use systemd:
+The bots start in **TEST mode**: they receive signals and show what they would buy, but place **no real orders**. Leave them like that for a day or two and check with `bot today`.
 
-```bash
-sudo tee /etc/systemd/system/trading-client.service << EOF
-[Unit]
-Description=Trading Signal Execution Client
-After=network.target
+### Everyday commands
 
-[Service]
-Type=simple
-User=$USER
-WorkingDirectory=/path/to/client_agent
-ExecStart=/usr/bin/python3 client.py
-Restart=always
-RestartSec=5
+Open the VM's SSH window and type any of these:
 
-[Install]
-WantedBy=multi-user.target
-EOF
+| Type this | What it does |
+|---|---|
+| `bot status` | Shows whether each bot is running, and whether it's in TEST or LIVE mode |
+| `bot today` | Today's signals, trades and errors |
+| `bot logs` | Watch the bots live. Press **Ctrl+C** to stop watching; the bots keep running |
+| `bot live equity` | Start placing **real** share orders (asks you to type `YES`) |
+| `bot test equity` | Go back to test mode (no real orders) |
+| `bot live fno` / `bot test fno` | The same for the options bot |
+| `bot restart` | Restart the bots. This fixes most problems |
+| `bot settings equity` | Change a setting, e.g. the amount per trade. Save with **Ctrl+O**, Enter, then exit with **Ctrl+X**. The bot restarts by itself |
+| `bot setup` | Run the question-and-answer setup again (your old answers are kept) |
+| `bot update` | Download the newest version of the bots and restart them |
+| `bot help` | List all commands |
 
-sudo systemctl enable trading-client
-sudo systemctl start trading-client
-sudo journalctl -u trading-client -f  # View logs
-```
+Add `equity` or `fno` to `logs`, `today`, `restart`, `stop` or `start` to act on just one bot, e.g. `bot logs fno`.
+
+Try not to run `bot update` or `bot restart` during market hours (09:15–15:30). Signals that arrive while a bot is restarting are missed.
+
+### If something looks wrong
+
+1. Run `bot status`. If a bot says **NOT RUNNING**, run `bot restart`.
+2. Still not working? Run `bot logs`, wait 30 seconds, and send a screenshot to whoever maintains the bots.
+3. After changing your Dhan PIN or TOTP, or if the server address changes, run `bot setup` again.
+
+### What the setup does (for the technical person)
+
+- Installs `git`, `python3-venv` and `nano`. Sets the VM timezone to IST. Caps journald logs at 500 MB.
+- Creates `.venv` and installs `client_agent/requirements.txt` and `fno_agent/requirements.txt`.
+- Writes `client_agent/.env` and `fno_agent/.env` with `chmod 600`. It sets `BROKER=dhan` and leaves `DHAN_ACCESS_TOKEN` blank, so each start does a fresh TOTP login. Other keys, such as `ALLOWED_CHANNELS`, are kept.
+- Installs systemd units from `deploy/`, with the user and paths filled in:
+  - `trading-client.service`: runs the equity client with `Restart=always`.
+  - `trading-client-restart.timer`: restarts the equity client Mon–Fri at 08:45 IST, whatever the VM's timezone. The client only loads the scrip master at startup, and on its own only re-logs in to Dhan after an order is rejected. The restart gives it both fresh every morning.
+  - `fno-agent.service`: the FnO agent. It refreshes its own session and instruments daily.
+- Links `/usr/local/bin/bot` → `./bot` (the everyday command). Shared helpers are in `deploy/lib.sh`.
+- Restarts each selected service and waits for `Connected to broadcaster` in its journal.
+
+Only `BROKER=dhan` is set up this way. The Zerodha path can't trade equity signals unattended: its token expires daily, and `ZerodhaBroker.handle_signal` expects F&O-style `action` fields.
+
+The equity client ignores signals with `"asset_class": "FNO"` and the FnO agent ignores the rest, so each signal is traded once. Both log in to the same Dhan account. If `bot today equity` shows `Triggering mid-trade auto-login` every day, the two logins are cancelling each other out; tell the maintainer.
+
+Raw systemd commands still work, e.g. `systemctl status trading-client fno-agent` and `journalctl -u trading-client -f`.
 
 ---
 
@@ -247,4 +285,8 @@ sudo journalctl -u trading-client -f  # View logs
 | `Invalid_Authentication` / `DH-901` | Dhan access token expired. Generate a new one at api.dhan.co |
 | `WebSocket connection error` | Server might be down or URL is wrong. Check `WS_SERVER_URL`. |
 | `Running in DRY RUN mode` | Set `DRY_RUN=false` in `.env` for live trading. |
-| No signals received | Check server health: `curl http://<server>/health` |
+| No signals received | Check server health: `curl https://<server>/health` |
+| Service keeps restarting | `bot logs equity` shows the crash. Usually a setting is wrong (`bot setup`) or packages are missing (`bot update`). |
+| `Initial Dhan auto-login failed. Exiting.` | Check `DHAN_PIN` / `DHAN_TOTP_SECRET` and that the VM clock is correct (`timedatectl`), since TOTP depends on the time. systemd retries every 5s. |
+| Orders rejected for IP | The VM's external IP must be the reserved static IP that is whitelisted with Dhan: `curl -s ifconfig.me`. |
+| Bot not running after reboot | Run `bot setup` again and answer **Y** for that bot. |
