@@ -1,0 +1,138 @@
+#!/usr/bin/env bash
+# Everyday control of the trading bots. Type `bot help` for the list of commands.
+set -uo pipefail
+
+REPO_DIR="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd)"
+source "$REPO_DIR/deploy/lib.sh"
+cd "$REPO_DIR"
+
+usage() {
+    cat <<'EOF'
+Trading bots — commands
+
+  bot status                 Is everything running? Test or live?
+  bot logs [equity|fno]      Watch the bots live (press Ctrl+C to stop watching)
+  bot today [equity|fno]     Show today's trades and errors
+
+  bot live  equity|fno       Start placing REAL orders
+  bot test  equity|fno       Back to TEST mode (no real orders)
+
+  bot restart [equity|fno]   Restart (fixes most problems)
+  bot stop  [equity|fno]     Stop a bot
+  bot start [equity|fno]     Start a bot again
+
+  bot settings equity|fno    Change settings (opens the settings file, restarts after)
+  bot setup                  Re-run the guided setup (keeps your current answers)
+  bot update                 Download the latest version and restart
+
+Leave out equity|fno to act on every installed bot.
+EOF
+}
+
+# bots_for ARG -> list of installed bots the command applies to
+bots_for() {
+    local b list=""
+    case "${1:-all}" in
+        equity|fno) list="$1" ;;
+        all|"")     list="equity fno" ;;
+        *) fail "Unknown bot '$1'. Use: equity or fno"; exit 1 ;;
+    esac
+    for b in $list; do
+        if is_installed "$b"; then echo "$b"
+        elif [ "${1:-all}" != all ]; then fail "$(label_of "$b") is not set up. Run: bot setup"; exit 1
+        fi
+    done
+}
+
+need_bot() { [ -n "${1:-}" ] || { fail "Say which bot: equity or fno   (e.g.  bot $CMD equity)"; exit 1; }; }
+
+status() {
+    local b svc any=0
+    for b in $(bots_for all); do
+        any=1
+        svc=$(svc_of "$b")
+        if systemctl is-active -q "$svc"; then
+            ok "$(label_of "$b"): RUNNING — $(mode_of "$b") — since $(systemctl show -p ActiveEnterTimestamp --value "$svc" | cut -d' ' -f2-3)"
+        elif systemctl is-enabled -q "$svc" 2>/dev/null; then
+            fail "$(label_of "$b"): NOT RUNNING. Try: bot restart $b   then: bot logs $b"
+        else
+            warn "$(label_of "$b"): switched off (not selected in setup)"
+        fi
+    done
+    [ $any = 1 ] || warn "No bots set up yet. Run: bash deploy/setup_vm.sh"
+    if systemctl is-enabled -q trading-client-restart.timer 2>/dev/null; then
+        echo "  Equity bot daily fresh start: $(systemctl show -p NextElapseUSecRealtime --value trading-client-restart.timer)"
+    fi
+}
+
+logs() {
+    local args=() b
+    for b in $(bots_for "${1:-all}"); do args+=(-u "$(svc_of "$b")"); done
+    echo "Showing live activity. Press Ctrl+C to stop watching (the bots keep running)."
+    sudo journalctl "${args[@]}" -n 40 -f --no-hostname -o short
+}
+
+today() {
+    local args=() b
+    for b in $(bots_for "${1:-all}"); do args+=(-u "$(svc_of "$b")"); done
+    sudo journalctl "${args[@]}" --since today --no-pager --no-hostname -o short \
+        | grep -E "Received signal|Execution result|rejected|REJECTED|NOTIFY|ERROR|failed|Skipped" \
+        | cut -c1-250 \
+        || echo "Nothing traded or failed today."
+}
+
+svc_action() {  # svc_action restart|stop|start [bot]
+    local b
+    for b in $(bots_for "${2:-all}"); do
+        sudo systemctl "$1" "$(svc_of "$b")" && ok "$(label_of "$b"): $1 done"
+    done
+    [ "$1" = stop ] || { sleep 3; status; }
+}
+
+set_mode() {  # set_mode live|test bot
+    local b=$2 f; f=$(env_of "$b")
+    bots_for "$b" >/dev/null || exit 1
+    if [ "$1" = live ]; then
+        warn "$(label_of "$b") will place REAL orders with REAL money."
+        read -r -p "  Type YES to continue: " answer
+        [ "$answer" = "YES" ] || { echo "Cancelled. Nothing changed."; exit 0; }
+        set_env DRY_RUN false "$f"
+    else
+        set_env DRY_RUN true "$f"
+    fi
+    sudo systemctl restart "$(svc_of "$b")"
+    ok "$(label_of "$b") is now in $(mode_of "$b")"
+}
+
+settings() {
+    local b=$1 f; f=$(env_of "$b")
+    bots_for "$b" >/dev/null || exit 1
+    echo "Opening settings. Change a value after the = sign."
+    echo "Save: Ctrl+O then Enter.   Exit: Ctrl+X."
+    read -r -p "Press Enter to open..." _
+    nano "$f"
+    sudo systemctl restart "$(svc_of "$b")"
+    sleep 3; status
+}
+
+update() {
+    echo "Downloading the latest version..."
+    git pull --ff-only || { fail "Could not update (local files were changed?). Ask for help."; exit 1; }
+    .venv/bin/pip install -q -r client_agent/requirements.txt -r fno_agent/requirements.txt
+    ok "Updated."
+    svc_action restart all
+}
+
+CMD="${1:-help}"; shift || true
+case "$CMD" in
+    status)   status ;;
+    logs)     bots_for "${1:-all}" >/dev/null; logs "${1:-all}" ;;
+    today)    bots_for "${1:-all}" >/dev/null; today "${1:-all}" ;;
+    live|test) need_bot "${1:-}"; set_mode "$CMD" "$1" ;;
+    restart|stop|start) bots_for "${1:-all}" >/dev/null; svc_action "$CMD" "${1:-all}" ;;
+    settings) need_bot "${1:-}"; settings "$1" ;;
+    setup)    bash "$REPO_DIR/deploy/setup_vm.sh" ;;
+    update)   update ;;
+    help|-h|--help) usage ;;
+    *) fail "Unknown command '$CMD'"; echo; usage; exit 1 ;;
+esac

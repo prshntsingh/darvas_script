@@ -1,0 +1,35 @@
+"""Telegram Bot API notifications for trade events (falls back to logging only)."""
+
+import asyncio
+import logging
+
+import requests
+
+logger = logging.getLogger(__name__)
+
+
+class Notifier:
+    def __init__(self, bot_token: str = "", chat_id: str = "", prefix: str = "[FnO]"):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.prefix = prefix
+
+    @property
+    def enabled(self) -> bool:
+        return bool(self.bot_token and self.chat_id)
+
+    def _post(self, text: str):
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{self.bot_token}/sendMessage",
+                json={"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True},
+                timeout=10,
+            )
+        except Exception as e:
+            logger.error(f"Telegram notify failed: {e}")
+
+    async def send(self, text: str):
+        text = f"{self.prefix} {text}"
+        logger.info(f"NOTIFY: {text}")
+        if self.enabled:
+            await asyncio.to_thread(self._post, text)

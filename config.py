@@ -66,6 +66,7 @@ class ChannelMapping:
     discord_webhook_url: str
     label: str
     enable_trading: bool = False  # Opt-in: only broadcast trade signals for this channel
+    enable_fno_trading: bool = False  # Opt-in: parse & broadcast option (FnO) signals for this channel
 
 def _parse_channel_mappings():
     """Parse CHANNEL_MAPPINGS from env, or fall back to legacy single-channel vars."""
@@ -83,11 +84,13 @@ def _parse_channel_mappings():
                 webhook = entry.get('discord_webhook_url', '')
                 label = entry.get('label', str(tg_id))
                 enable_trading = entry.get('enable_trading', False)
+                enable_fno_trading = entry.get('enable_fno_trading', False)
                 mappings.append(ChannelMapping(
                     telegram_channel_id=tg_id,
                     discord_webhook_url=webhook,
                     label=label,
                     enable_trading=bool(enable_trading),
+                    enable_fno_trading=bool(enable_fno_trading),
                 ))
             return mappings
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:

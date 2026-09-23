@@ -15,6 +15,7 @@ import asyncio
 import signal
 import time
 import zoneinfo
+from datetime import datetime, timezone
 import logging
 from contextlib import asynccontextmanager
 
@@ -43,6 +44,7 @@ from services.notion_service import send_to_notion_async
 from services.discord_service import send_to_discord_async
 from services.gemini_service import extract_trade_async, hybrid_extract_trade
 from services.regex_service import filter_message
+from services.fno_parser import hybrid_fno_extract, looks_like_option
 from services.google_sheets_service import append_to_sheet_async
 
 # --- Logging ---
@@ -58,6 +60,9 @@ WS_AUTH_TOKEN = os.environ.get("WS_AUTH_TOKEN", "")
 
 # --- IST Timezone (per AGENTS.md: never remove this) ---
 IST_ZONE = zoneinfo.ZoneInfo("Asia/Kolkata")
+
+# --- FnO: never broadcast option entries older than this (e.g. startup catch-up replay) ---
+FNO_MAX_SIGNAL_AGE_SEC = int(os.environ.get("FNO_MAX_SIGNAL_AGE_SEC", "120"))
 
 
 # ============================================================================
@@ -213,10 +218,21 @@ async def process_telegram_message(message, channel_id):
         send_to_discord_async(text, message=message, webhook_url=mapping.discord_webhook_url)
     )
     
-    # --- Equity Signal Extraction & WebSocket Broadcast (opt-in per channel) ---
     formatted_time = message_date_ist.strftime("%Y-%m-%d %H:%M:%S")
-    
-    if mapping.enable_trading:
+    signal_id = f"{channel_id}:{message.id}"
+
+    # --- FnO Signal Extraction & WebSocket Broadcast (opt-in per channel) ---
+    # Only option-looking messages (strike+CE/PE, CALL/PUT) take the FnO path, and they never fall
+    # through to equity. Plain equity messages pay just one ~1µs regex check here.
+    fno_handled = False
+    if mapping.enable_fno_trading and looks_like_option(text):
+        fno_handled = True
+        await handle_fno_message(text, message, signal_id, mapping)
+
+    # --- Equity Signal Extraction & WebSocket Broadcast (opt-in per channel) ---
+    if fno_handled:
+        pass
+    elif mapping.enable_trading:
         # Apply message-level filters (index blocker, sell blocker, etc.)
         block_reason = filter_message(text)
         if block_reason:
@@ -255,6 +271,8 @@ async def process_telegram_message(message, channel_id):
                         "source": source,
                     }
                     trade_signal["channel_label"] = mapping.label
+                    trade_signal["asset_class"] = "EQUITY"
+                    trade_signal["signal_id"] = signal_id
                     
                     await manager.broadcast(trade_signal)
                     t_broadcast = time.perf_counter_ns()
@@ -308,6 +326,54 @@ async def process_telegram_message(message, channel_id):
 # ============================================================================
 # Telegram Event Handlers & Catch-Up
 # ============================================================================
+
+async def handle_fno_message(text: str, message, signal_id: str, mapping) -> bool:
+    """
+    Parse an option signal and broadcast it to FnO clients.
+    Returns True if the message was an FnO signal (so the equity path is skipped).
+    """
+    t_start = time.perf_counter_ns()
+    try:
+        fno_signal = await hybrid_fno_extract(text)
+    except Exception as e:
+        logger.error(f"FnO extraction failed: {e}", exc_info=True)
+        asyncio.create_task(send_trade_log(f"[X] FnO extraction error: {e}"))
+        return False
+    extract_ms = (time.perf_counter_ns() - t_start) / 1_000_000
+
+    if not fno_signal:
+        logger.debug(f"[{mapping.label}] No FnO signal found ({extract_ms:.1f}ms)")
+        return False
+
+    desc = (
+        f"{fno_signal['symbol']} {fno_signal['strike']:g}{fno_signal['option_type']} "
+        f"{fno_signal.get('expiry_month') or ''} @ {fno_signal['entry_min']:g}-{fno_signal['entry_max']:g} "
+        f"SL {fno_signal['stop_loss']:g} T {','.join(f'{t:g}' for t in fno_signal['targets'])}"
+    )
+
+    age_sec = (datetime.now(timezone.utc) - message.date).total_seconds()
+    if age_sec > FNO_MAX_SIGNAL_AGE_SEC:
+        logger.warning(f"[{mapping.label}] Stale FnO signal ({age_sec:.0f}s old), not broadcasting: {desc}")
+        asyncio.create_task(send_trade_log(f"[⏱️] Stale FnO signal skipped ({age_sec:.0f}s old): {desc}"))
+        return True
+
+    fno_signal.update({
+        "asset_class": "FNO",
+        "signal_id": signal_id,
+        "channel_label": mapping.label,
+        "message_ts": message.date.isoformat(),
+        "_latency_ms": {"extraction": round(extract_ms, 2), "source": fno_signal["source"]},
+    })
+    await manager.broadcast(fno_signal)
+    total_ms = (time.perf_counter_ns() - t_start) / 1_000_000
+
+    logger.info(f"[⚡ FNO] {desc} | extract={extract_ms:.1f}ms ({fno_signal['source']}) | total={total_ms:.1f}ms")
+    asyncio.create_task(send_trade_log(
+        f"[🎯] FnO signal ({fno_signal['source']}): {desc}\n"
+        f"[📡] Broadcast to {manager.active_count} client(s) in {total_ms:.1f}ms"
+    ))
+    return True
+
 
 async def start_telegram_listener():
     """Start the Telethon client, register handlers, and run catch-up."""

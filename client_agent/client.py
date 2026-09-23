@@ -742,6 +742,10 @@ async def connect_and_listen():
                     try:
                         t_recv = time_mod.perf_counter()
                         signal = json.loads(raw_message)
+                        # Option signals are handled by the separate fno_agent process
+                        if signal.get("asset_class") == "FNO":
+                            logger.info(f"Ignoring FnO signal {signal.get('signal_id')} (handled by fno_agent).")
+                            continue
                         # Filter by channel if ALLOWED_CHANNELS is configured
                         channel_label = signal.get("channel_label", "").lower()
                         if ALLOWED_CHANNELS and channel_label not in ALLOWED_CHANNELS:
