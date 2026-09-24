@@ -17,6 +17,7 @@ import requests
 from fno_agent.brokers.base import (
     CANCELLED, COMPLETE, OPEN, REJECTED, BrokerAuthError, BrokerError, FnOBroker, OrderState,
 )
+from client_agent.dhan_token import force_login, fresh_token, is_token_error
 from fno_agent.instruments import Contract
 
 logger = logging.getLogger(__name__)
@@ -53,16 +54,28 @@ class DhanFnOBroker(FnOBroker):
 
     def connect(self) -> None:
         if not self.access_token and self.pin and self.totp_secret:
-            self._login()
+            # Reuse the token shared with the equity bot (a new login would invalidate its token)
+            self.access_token = fresh_token("", self._login)
+            if not self._token_works():
+                self.access_token = fresh_token(self.access_token, self._login)
         if not self.access_token and not self.dry_run:
             raise BrokerAuthError("No Dhan access token and TOTP auto-login unavailable/failed.")
 
     def refresh_session(self) -> None:
+        """Daily 08:00 refresh: one new login, shared with the equity bot through the token file."""
         if self.pin and self.totp_secret:
-            self._login()
+            self.access_token = force_login(self._login)
 
-    def _login(self) -> None:
-        """Generate a fresh access token via PIN + TOTP (same flow as client_agent DhanBroker)."""
+    def _token_works(self) -> bool:
+        try:
+            resp = requests.get(BASE_URL + "/profile", headers={"access-token": self.access_token}, timeout=10)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.warning(f"Could not verify Dhan token: {e}")
+            return True  # network hiccup: don't burn a login; a failed call will still self-heal
+
+    def _login(self) -> str:
+        """Generate a new access token via PIN + TOTP (same flow as client_agent DhanBroker)."""
         import pyotp
 
         totp = pyotp.TOTP(self.totp_secret).now()
@@ -77,8 +90,8 @@ class DhanFnOBroker(FnOBroker):
             raise BrokerAuthError(f"Dhan auto-login error: {e}") from e
         if resp.status_code != 200 or "accessToken" not in data:
             raise BrokerAuthError(f"Dhan auto-login failed (HTTP {resp.status_code}): {data}")
-        self.access_token = data["accessToken"]
         logger.info("Dhan access token refreshed via TOTP.")
+        return data["accessToken"]
 
     def _request(self, method: str, path: str, json: Optional[dict] = None, _retry: bool = True):
         headers = {
@@ -88,10 +101,10 @@ class DhanFnOBroker(FnOBroker):
             "client-id": self.client_id,
         }
         resp = requests.request(method, BASE_URL + path, headers=headers, json=json, timeout=10)
-        if resp.status_code in (401, 403) or "invalid token" in resp.text.lower():
+        if is_token_error(resp.status_code, resp.text):
             if _retry and self.pin and self.totp_secret:
-                logger.warning(f"Dhan auth rejected (HTTP {resp.status_code}); re-logging in and retrying.")
-                self._login()
+                logger.warning(f"Dhan token rejected (HTTP {resp.status_code}); refreshing and retrying.")
+                self.access_token = fresh_token(self.access_token, self._login)
                 return self._request(method, path, json, _retry=False)
             raise BrokerAuthError(f"Dhan unauthorized (HTTP {resp.status_code}): {resp.text[:200]}")
         try:

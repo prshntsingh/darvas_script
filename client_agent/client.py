@@ -30,6 +30,11 @@ import time as time_mod
 import requests
 from datetime import datetime, time, timedelta, timezone
 
+try:  # imported as client_agent.client (tests, fno_agent)
+    from client_agent.dhan_token import fresh_token, is_token_error
+except ImportError:  # run as `python client.py` from client_agent/
+    from dhan_token import fresh_token, is_token_error
+
 # --- Setup Logging ---
 logging.basicConfig(
     level=logging.INFO,
@@ -464,18 +469,44 @@ class DhanBroker:
         self.dry_run = dry_run
         self._scrips = DhanScripMap()
 
+    PROFILE_URL = "https://api.dhan.co/v2/profile"
+
     def connect(self):
         """Authenticate (if needed) and prepare for order placement."""
         if not self.access_token and self.pin and self.totp_secret:
-            success = self._auto_login()
+            # Reuse the token shared with the FnO bot (a new login would invalidate its token)
+            success = self._auto_login(rejected="")
+            if success and not self._token_works():
+                success = self._auto_login(rejected=self.access_token)
             if not success:
                 logger.error("Initial Dhan auto-login failed. Exiting.")
                 sys.exit(1)
         
         self._scrips.load()
 
-    def _auto_login(self) -> bool:
-        """Programmatically generate Dhan access token using pyotp."""
+    def _token_works(self) -> bool:
+        """Cheap check that the current token is accepted (e.g. the shared one is not expired)."""
+        try:
+            resp = requests.get(self.PROFILE_URL, headers=self._build_headers(), timeout=10)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.warning(f"Could not verify Dhan token: {e}")
+            return True  # network hiccup: don't burn a login; an order failure will still self-heal
+
+    def _auto_login(self, rejected: str = "") -> bool:
+        """
+        Get a working Dhan access token after `rejected` failed.
+
+        Uses the token shared with the other bot if it's newer; otherwise logs in with PIN + TOTP.
+        """
+        token = fresh_token(rejected, self._generate_token)
+        if token:
+            self.access_token = token
+            return True
+        return False
+
+    def _generate_token(self) -> str | None:
+        """Programmatically generate a new Dhan access token using pyotp."""
         try:
             import pyotp
             logger.info("Generating Dhan TOTP for auto-login...")
@@ -488,21 +519,20 @@ class DhanBroker:
             if response.status_code == 200:
                 data = response.json()
                 if "accessToken" in data:
-                    self.access_token = data["accessToken"]
                     logger.info("Successfully generated Dhan access token via auto-login!")
-                    return True
+                    return data["accessToken"]
                 else:
                     logger.error(f"Dhan auto-login failed: {data}")
-                    return False
+                    return None
             else:
                 logger.error(f"Dhan auto-login HTTP {response.status_code}: {response.text}")
-                return False
+                return None
         except ImportError:
             logger.error("pyotp is required for auto-login. Please run: pip install pyotp")
-            return False
+            return None
         except Exception as e:
             logger.error(f"Dhan auto-login error: {e}")
-            return False
+            return None
 
     def _build_headers(self) -> dict:
         return {
@@ -532,11 +562,11 @@ class DhanBroker:
                 return {"order_id": order_id, "status": order_status}
             
             # --- 24/7 Self-Healing Auth ---
-            # If token expired (401 Unauthorized or similar), auto-refresh and retry once.
-            elif response.status_code in (401, 403) or "unauthorized" in str(result).lower():
+            # Token expired or replaced (401/403, DH-901, DH-906 "Invalid Token"): refresh and retry once.
+            elif is_token_error(response.status_code, result):
                 if not is_retry and self.pin and self.totp_secret:
-                    logger.warning(f"Dhan token expired (HTTP {response.status_code}). Triggering mid-trade auto-login...")
-                    if self._auto_login():
+                    logger.warning(f"Dhan token rejected (HTTP {response.status_code}: {result}). Triggering mid-trade auto-login...")
+                    if self._auto_login(rejected=self.access_token):
                         logger.info("Auto-login succeeded! Retrying order...")
                         return self._place_dhan_order(payload, is_retry=True)
                     else:

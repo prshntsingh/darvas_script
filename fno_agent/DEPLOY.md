@@ -118,7 +118,10 @@ The bot starts in **TEST mode**: it receives option signals and shows the contra
   - creates the repo `.venv` and installs `fno_agent/requirements.txt`
   - writes `fno_agent/.env` (chmod 600) with `BROKER=dhan` and a blank `DHAN_ACCESS_TOKEN`; other keys are kept
   - installs `fno_agent/deploy/fno-agent.service` (`Restart=always`) and links `/usr/local/bin/bot`
-- Both bots log in to the same Dhan account with TOTP. If Dhan invalidates the older token on each new login, each bot recovers on its next call with a re-login and retry. If `Triggering mid-trade auto-login` shows up every day, tell the maintainer so both bots can share one token.
+- **Shared Dhan token.** Dhan keeps only one valid token per account, so each login cancels the previous one. Both bots therefore share one token through `~/.dhan_token` (`client_agent/dhan_token.py`):
+  - A bot reuses the shared token on start.
+  - When Dhan rejects a token (`DH-906 Invalid Token`), the bot takes the other bot's newer token from the file, and only logs in again if there isn't one.
+  - The options bot's 08:00 login is the one new login per day, and the equity bot picks it up at its 08:45 restart.
 - **Other settings** (`bot settings fno`):
   - `FNO_CHASE_PCT` (default 3)
   - `FNO_ENTRY_TIMEOUT_SEC` (default 300)
