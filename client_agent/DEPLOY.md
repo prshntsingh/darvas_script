@@ -110,5 +110,6 @@ The bot starts in **TEST mode**: it receives signals and shows what it *would* b
   - `client_agent/deploy/trading-client.service`: `Restart=always`
   - `client_agent/deploy/trading-client-restart.timer`: `OnCalendar=Mon..Fri 08:45 Asia/Kolkata`
 - The client only loads the scrip master at startup, and on its own it only re-logs in to Dhan after an order is rejected. The daily restart keeps both fresh.
+- **Shared Dhan token.** Dhan keeps only one valid token per account. The equity and options bots share one token through `~/.dhan_token` (`client_agent/dhan_token.py`), so they don't cancel each other's login. If an order is rejected with `DH-906 Invalid Token`, the bot takes the newer shared token, or logs in again, and retries the order once.
 - Only `BROKER=dhan` is supported for unattended running. Zerodha's token expires daily, and `ZerodhaBroker.handle_signal` expects F&O-style `action` fields.
 - The raw systemd commands still work: `systemctl status trading-client`, `journalctl -u trading-client -f`.
