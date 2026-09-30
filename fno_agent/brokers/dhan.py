@@ -130,9 +130,11 @@ class DhanFnOBroker(FnOBroker):
     # --- orders -------------------------------------------------------------
 
     def place_entry(self, contract: Contract, qty: int, price: float,
-                    stop_loss: float, target: Optional[float]) -> str:
-        if target is None:
-            raise BrokerError("Dhan super order needs a target")
+                    stop_loss: Optional[float], target: Optional[float]) -> str:
+        if stop_loss is None and target is None:
+            return self._place_plain_entry(contract, qty, price)
+        if stop_loss is None or target is None:
+            raise BrokerError("Dhan super order needs both a stop-loss and a target")
         payload = {
             "dhanClientId": self.client_id,
             "correlationId": uuid.uuid4().hex[:25],
@@ -156,9 +158,47 @@ class DhanFnOBroker(FnOBroker):
         logger.info(f"Dhan super order placed: {order_id} ({data.get('orderStatus')})")
         return str(order_id)
 
-    def entry_status(self, order_id: str) -> OrderState:
+    def _place_plain_entry(self, contract: Contract, qty: int, price: float) -> str:
+        """SL/target disabled: a normal LIMIT buy, carry-forward (MARGIN), no protection legs."""
+        payload = {
+            "dhanClientId": self.client_id,
+            "correlationId": uuid.uuid4().hex[:25],
+            "transactionType": "BUY",
+            "exchangeSegment": contract.exchange_segment,
+            "productType": "MARGIN",
+            "orderType": "LIMIT",
+            "validity": "DAY",
+            "securityId": str(contract.security_id),
+            "quantity": int(qty),
+            "price": price,
+            "disclosedQuantity": 0,
+            "triggerPrice": 0,
+            "afterMarketOrder": False,
+        }
+        if self.dry_run:
+            return self._dry_order("order (no SL/target)", payload, qty)
+        data = self._request("POST", "/orders", payload)
+        order_id = data.get("orderId")
+        if not order_id or data.get("orderStatus") == "REJECTED":
+            raise BrokerError(f"Dhan order rejected: {data}")
+        logger.info(f"Dhan order placed (no SL/target): {order_id} ({data.get('orderStatus')})")
+        return str(order_id)
+
+    def entry_status(self, order_id: str, protected: bool = True) -> OrderState:
         if order_id.startswith("DRY-"):
             return self._dry_status(order_id)
+        if not protected:
+            data = self._request("GET", f"/orders/{order_id}")
+            o = data[0] if isinstance(data, list) and data else data
+            if not isinstance(o, dict) or not o.get("orderId"):
+                raise BrokerError(f"Dhan order {order_id} not found")
+            raw = str(o.get("orderStatus", "")).upper()
+            return OrderState(
+                status=_STATUS_MAP.get(raw, OPEN),
+                filled_qty=int(o.get("filledQty") or 0),
+                avg_price=float(o["averageTradedPrice"]) if o.get("averageTradedPrice") else None,
+                message=raw,
+            )
         orders = self._request("GET", "/super/orders")
         for o in orders if isinstance(orders, list) else orders.get("data", []):
             if str(o.get("orderId")) == str(order_id):
@@ -171,9 +211,13 @@ class DhanFnOBroker(FnOBroker):
                 )
         raise BrokerError(f"Dhan super order {order_id} not found")
 
-    def cancel_entry(self, order_id: str) -> None:
+    def cancel_entry(self, order_id: str, protected: bool = True) -> None:
         if order_id.startswith("DRY-"):
             self._dry_orders[order_id] = 0
+            return
+        if not protected:
+            self._request("DELETE", f"/orders/{order_id}")
+            logger.info(f"Dhan order {order_id} cancelled.")
             return
         self._request("DELETE", f"/super/orders/{order_id}/ENTRY_LEG")
         logger.info(f"Dhan super order {order_id}: entry leg cancelled.")

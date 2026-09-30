@@ -86,6 +86,22 @@ ask_required() {
     done
 }
 
+yes_no() {  # yes_no "Question" default(y/n)
+    local answer
+    read -r -p "  $1 [$( [ "$2" = y ] && echo Y/n || echo y/N )]: " answer
+    answer=${answer:-$2}
+    [[ "$answer" =~ ^[Yy] ]]
+}
+
+# ask_pct VAR "Question" "default"  -> repeats until a number > 0 is entered
+ask_pct() {
+    while true; do
+        ask_required "$1" "$2" "${3:-}"
+        python3 -c "import sys; sys.exit(0 if float(sys.argv[1]) > 0 else 1)" "${!1}" 2>/dev/null && return 0
+        warn "Please enter a number greater than 0 (e.g. 2 or 1.5)."
+    done
+}
+
 # system_setup REQUIREMENTS_FILE...  (idempotent: fast when already done)
 system_setup() {
     bold "Preparing the VM (first time takes a minute)..."

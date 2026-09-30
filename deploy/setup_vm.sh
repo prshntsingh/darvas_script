@@ -9,13 +9,6 @@ REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$REPO_DIR/deploy/lib.sh"
 require_not_root deploy/setup_vm.sh
 
-yes_no() {  # yes_no "Question" default(y/n)
-    local answer
-    read -r -p "  $1 [$( [ "$2" = y ] && echo Y/n || echo y/N )]: " answer
-    answer=${answer:-$2}
-    [[ "$answer" =~ ^[Yy] ]]
-}
-
 bold "Which bots do you want to set up on this VM?"
 status=0; any=0
 if yes_no "Set up the EQUITY (shares) bot?" y; then

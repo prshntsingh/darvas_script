@@ -5,6 +5,7 @@ Signal lifecycle:
     RECEIVED -> REJECTED | ERROR
              -> ENTRY_PLACED -> CANCELLED (nothing filled)
                              -> FILLED -> PROTECTED | UNPROTECTED (protection failed; act manually!)
+                                       -> ENTERED (SL/target disabled by FNO_SL_TARGET_ENABLED=false)
 """
 
 import json
@@ -15,7 +16,7 @@ from typing import List, Optional
 
 RECEIVED, REJECTED, ERROR = "RECEIVED", "REJECTED", "ERROR"
 ENTRY_PLACED, FILLED, CANCELLED = "ENTRY_PLACED", "FILLED", "CANCELLED"
-PROTECTED, UNPROTECTED = "PROTECTED", "UNPROTECTED"
+PROTECTED, UNPROTECTED, ENTERED = "PROTECTED", "UNPROTECTED", "ENTERED"
 PENDING_STATES = (ENTRY_PLACED, FILLED)
 
 ENTRY, PROTECTION = "ENTRY", "PROTECTION"

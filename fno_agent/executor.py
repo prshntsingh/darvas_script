@@ -139,13 +139,18 @@ class FnOExecutor:
             limit = sig.entry_max
         limit = round_to_tick(limit, tick, "down")
         sl, targets = levels(sig, contract)
+        protect = self.s.sl_target_enabled
+        # The entry row's stop_loss records whether this trade gets SL/targets (None = disabled),
+        # so a restart (reconcile) finishes it the same way.
+        entry_sl = sl if protect else None
 
         deadline = datetime.now(timezone.utc) + timedelta(seconds=self.s.entry_timeout_sec)
         self.journal.update_signal(sid, contract=json.dumps(contract.to_dict()), planned_qty=size.qty,
                                    entry_deadline=deadline.isoformat())
 
         # Dhan: one super order per target tranche (SL/target attached). Kite: one entry, GTTs after fill.
-        if self.broker.protects_on_entry:
+        # SL/target disabled: one plain entry for the whole quantity.
+        if protect and self.broker.protects_on_entry:
             plan = [(lots * contract.lot_size, tgt) for lots, tgt in split_tranches(size.lots, targets)]
         else:
             plan = [(size.qty, None)]
@@ -153,7 +158,7 @@ class FnOExecutor:
         placed, errors = 0, []
         for qty, tgt in plan:
             try:
-                oid = await asyncio.to_thread(self.broker.place_entry, contract, qty, limit, sl, tgt)
+                oid = await asyncio.to_thread(self.broker.place_entry, contract, qty, limit, entry_sl, tgt)
             except BrokerAuthError:
                 if placed:
                     errors.append("auth failure mid-placement")
@@ -162,7 +167,7 @@ class FnOExecutor:
             except Exception as e:
                 errors.append(str(e))
                 continue
-            self.journal.add_order(sid, J.ENTRY, oid, qty, limit, sl, tgt, "OPEN")
+            self.journal.add_order(sid, J.ENTRY, oid, qty, limit, entry_sl, tgt, "OPEN")
             if not placed:
                 self.journal.update_signal(sid, J.ENTRY_PLACED)
             placed += 1
@@ -171,7 +176,9 @@ class FnOExecutor:
             return await self._reject(sid, f"entry rejected by broker: {'; '.join(errors)}")
         await self.notifier.send(
             f"🟢 BUY {size.lots} lot(s) = {size.qty} x {contract.describe()} LIMIT {limit} "
-            f"(LTP {ltp if ltp is not None else 'n/a'}) SL {sl} T {targets} [{sid}]"
+            f"(LTP {ltp if ltp is not None else 'n/a'}) "
+            + (f"SL {sl} T {targets}" if protect else "NO SL/target (FNO_SL_TARGET_ENABLED=false)")
+            + f" [{sid}]"
             + (f"\n⚠️ some tranches failed: {'; '.join(errors)}" if errors else "")
             + ("\nℹ️ signal says go slow/limited qty" if sig.caution else "")
         )
@@ -204,6 +211,12 @@ class FnOExecutor:
         self.journal.update_signal(sid, J.FILLED, filled_qty=filled)
         avg = next((st.avg_price for st in states.values() if st.avg_price), None)
 
+        if entries[0]["stop_loss"] is None:  # SL/target disabled when this trade was entered
+            self.journal.update_signal(sid, J.ENTERED, "SL/target disabled")
+            await self.notifier.send(f"✅ Filled {filled} x {contract.describe()} avg {avg or '?'}; "
+                                     f"NO stop-loss/target placed (FNO_SL_TARGET_ENABLED=false) [{sid}]")
+            return J.ENTERED
+
         if self.broker.protects_on_entry:
             self.journal.update_signal(sid, J.PROTECTED)
             await self.notifier.send(f"✅ Filled {filled} x {contract.describe()} avg {avg or '?'}; "
@@ -220,7 +233,8 @@ class FnOExecutor:
                 if states[e["id"]].status in TERMINAL:
                     continue
                 try:
-                    st = await asyncio.to_thread(self.broker.entry_status, e["broker_order_id"])
+                    st = await asyncio.to_thread(self.broker.entry_status, e["broker_order_id"],
+                                                 e["target"] is not None)
                 except BrokerError as ex:
                     logger.warning(f"Status check failed for {e['broker_order_id']}: {ex}")
                     continue
@@ -234,7 +248,8 @@ class FnOExecutor:
                 for e in entries:
                     if states[e["id"]].status not in TERMINAL:
                         try:
-                            await asyncio.to_thread(self.broker.cancel_entry, e["broker_order_id"])
+                            await asyncio.to_thread(self.broker.cancel_entry, e["broker_order_id"],
+                                                    e["target"] is not None)
                         except Exception as ex:
                             logger.error(f"Cancel failed for {e['broker_order_id']}: {ex}")
                 cancelled = True  # one final status poll to pick up partial fills

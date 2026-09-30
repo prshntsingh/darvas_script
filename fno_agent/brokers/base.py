@@ -55,15 +55,18 @@ class FnOBroker(ABC):
 
     @abstractmethod
     def place_entry(self, contract: Contract, qty: int, price: float,
-                    stop_loss: float, target: Optional[float]) -> str:
-        """Place a BUY LIMIT entry. Returns the broker order id."""
+                    stop_loss: Optional[float], target: Optional[float]) -> str:
+        """
+        Place a BUY LIMIT entry. Returns the broker order id.
+        stop_loss=None and target=None means SL/target is disabled: a plain order, no protection.
+        """
 
     @abstractmethod
-    def entry_status(self, order_id: str) -> OrderState:
-        ...
+    def entry_status(self, order_id: str, protected: bool = True) -> OrderState:
+        """protected=False: the entry was placed without SL/target (Dhan: a plain order, not a super order)."""
 
     @abstractmethod
-    def cancel_entry(self, order_id: str) -> None:
+    def cancel_entry(self, order_id: str, protected: bool = True) -> None:
         ...
 
     def place_protection(self, contract: Contract, qty: int, stop_loss: float,

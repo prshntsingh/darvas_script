@@ -94,7 +94,7 @@ The bot starts in **TEST mode**: it receives option signals and shows the contra
 ### What runs automatically
 - **Start and restart:** the bot starts when the VM starts, and restarts within 10 seconds if it crashes.
 - **Daily refresh:** at 08:00 IST a fresh Dhan login; at 08:30 IST today's contract list (lot sizes, expiries).
-- **Protection at Dhan:** stop-loss and targets are placed at Dhan with each entry, so they still work if the VM is down.
+- **Protection at Dhan** (on by default): the signal's stop-loss and targets are placed at Dhan with each entry, so they still work if the VM is down. To turn this off, set `FNO_SL_TARGET_ENABLED=false` (`bot settings fno`, or answer **n** in `bot setup fno`). The bot then only places the buy, and you manage exits yourself. A trade keeps the setting it was entered with, even across restarts.
 - **Crash recovery:** after a restart, any trade in progress is picked up again. Its fill is checked and the protection is completed.
 - **Market hours:** new entries only 09:15–15:25 IST on weekdays, skipping the dates in `fno_agent/holidays.json` (**update this every year**).
 

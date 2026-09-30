@@ -79,6 +79,12 @@ ALLOWED_CHANNELS = {c.strip().lower() for c in _RAW_ALLOWED_CHANNELS.split(",")}
 TRADE_AMOUNT_INR = int(os.environ.get("TRADE_AMOUNT_INR", "0"))
 DEFAULT_QUANTITY = int(os.environ.get("DEFAULT_QUANTITY", "1"))
 
+# Optional stop-loss + target (Dhan Super Order), as fixed % of the entry price.
+# Off by default. When on, EQUITY_SL_PCT is required (no default: it's your risk setting).
+EQUITY_SL_TARGET_ENABLED = os.environ.get("EQUITY_SL_TARGET_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+EQUITY_SL_PCT = float(os.environ.get("EQUITY_SL_PCT", "0") or 0)
+EQUITY_TARGET_PCT = float(os.environ.get("EQUITY_TARGET_PCT", "1") or 0)
+
 # Reconnection settings
 RECONNECT_BASE_DELAY = 1.0    # seconds
 RECONNECT_MAX_DELAY = 60.0    # seconds
@@ -451,6 +457,10 @@ def _is_amo_window() -> bool:
     return now.time() < market_start or now.time() >= market_end
 
 
+def _round_tick(price: float, tick: float = 0.05) -> float:
+    return float(f"{round(price / tick) * tick:.2f}")
+
+
 class DhanBroker:
     """
     Broker execution layer using Dhan HQ REST API.
@@ -460,6 +470,7 @@ class DhanBroker:
     """
 
     ORDERS_URL = "https://api.dhan.co/v2/orders"
+    SUPER_ORDERS_URL = "https://api.dhan.co/v2/super/orders"
 
     def __init__(self, client_id: str, access_token: str, pin: str = "", totp_secret: str = "", dry_run: bool = True):
         self.client_id = client_id
@@ -540,15 +551,16 @@ class DhanBroker:
             "access-token": self.access_token,
         }
 
-    def _place_dhan_order(self, payload: dict, is_retry: bool = False) -> dict | None:
-        """Send an order to Dhan v2 API."""
+    def _place_dhan_order(self, payload: dict, is_retry: bool = False, url: str | None = None) -> dict | None:
+        """Send an order to Dhan v2 API (plain order, or super order when url=SUPER_ORDERS_URL)."""
+        url = url or self.ORDERS_URL
         if self.dry_run:
             logger.info(f"[DRY RUN] Would send Dhan order: {json.dumps(payload, indent=2)}")
             return {"order_id": "DRY_RUN", "status": "SIMULATED", "params": payload}
 
         try:
             response = requests.post(
-                self.ORDERS_URL,
+                url,
                 headers=self._build_headers(),
                 json=payload,
                 timeout=10,
@@ -568,7 +580,7 @@ class DhanBroker:
                     logger.warning(f"Dhan token rejected (HTTP {response.status_code}: {result}). Triggering mid-trade auto-login...")
                     if self._auto_login(rejected=self.access_token):
                         logger.info("Auto-login succeeded! Retrying order...")
-                        return self._place_dhan_order(payload, is_retry=True)
+                        return self._place_dhan_order(payload, is_retry=True, url=url)
                     else:
                         logger.error("Mid-trade auto-login failed. Order aborted.")
                 
@@ -620,36 +632,61 @@ class DhanBroker:
             order_type = "MARKET"
             price = 0.0
 
+        protect = EQUITY_SL_TARGET_ENABLED
+
+        # --- Live price (MARKET orders): needed for quantity and/or SL/target ---
+        ltp = None
+        if order_type == "MARKET" and (TRADE_AMOUNT_INR > 0 or protect):
+            ltp = self._fetch_ltp(stock_symbol)
+
         # --- Capital Allocation & Quantity Calculation ---
         quantity = DEFAULT_QUANTITY
         if TRADE_AMOUNT_INR > 0:
             if order_type == "LIMIT" and entry_price > 0:
                 quantity = max(1, math.floor(TRADE_AMOUNT_INR / entry_price))
+            elif ltp:
+                quantity = max(1, math.floor(TRADE_AMOUNT_INR / ltp))
+                logger.info(f"Calculated QTY from LTP {ltp}: {quantity}")
             else:
-                # MARKET order - fetch live price from Yahoo Finance
-                try:
-                    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_symbol}.NS?interval=1d&range=1d"
-                    headers = {"User-Agent": "Mozilla/5.0"}
-                    logger.info(f"Fetching live quote from Yahoo Finance for {stock_symbol}.NS...")
-                    t0 = time_mod.perf_counter()
-                    resp = requests.get(url, headers=headers, timeout=5)
-                    t1 = time_mod.perf_counter()
-                    
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        ltp = data.get("chart", {}).get("result", [{}])[0].get("meta", {}).get("regularMarketPrice", 0)
-                        if ltp and ltp > 0:
-                            quantity = max(1, math.floor(TRADE_AMOUNT_INR / ltp))
-                            logger.info(f"Fetched LTP: {ltp} in {(t1-t0)*1000:.1f}ms. Calculated QTY: {quantity}")
-                        else:
-                            quantity = max(1, DEFAULT_QUANTITY)
-                            logger.warning(f"LTP not found in YF response. Using DEFAULT_QUANTITY: {quantity}")
-                    else:
-                        quantity = max(1, DEFAULT_QUANTITY)
-                        logger.warning(f"YF returned {resp.status_code}. Using DEFAULT_QUANTITY: {quantity}")
-                except Exception as e:
-                    quantity = max(1, DEFAULT_QUANTITY)
-                    logger.error(f"Failed to fetch live price via YF: {e}. Using DEFAULT_QUANTITY: {quantity}")
+                quantity = max(1, DEFAULT_QUANTITY)
+                logger.warning(f"No live price. Using DEFAULT_QUANTITY: {quantity}")
+
+        # --- Optional stop-loss + target (Dhan Super Order) ---
+        # Base = the LIMIT price sent (worst-case fill), or the live price for MARKET orders.
+        ref_price = price if order_type == "LIMIT" else ltp
+        if protect and use_amo:
+            logger.warning(f"[🌙 AMO] SL/target can't be attached to an after-market order. "
+                           f"Placing {stock_symbol} WITHOUT SL/target.")
+            protect = False
+        elif protect and not ref_price:
+            logger.warning(f"No price to compute SL/target for {stock_symbol} (live price unavailable). "
+                           f"Placing order WITHOUT SL/target.")
+            protect = False
+
+        if protect:
+            stop_loss = _round_tick(ref_price * (1 - EQUITY_SL_PCT / 100))
+            target = _round_tick(ref_price * (1 + EQUITY_TARGET_PCT / 100))
+            payload = {
+                "dhanClientId": self.client_id,
+                "correlationId": str(uuid.uuid4())[:30],
+                "transactionType": "BUY",
+                "exchangeSegment": segment,
+                "productType": product_type,
+                "orderType": order_type,
+                "securityId": str(scrip_id),
+                "quantity": quantity,
+                "price": price,
+                "targetPrice": target,
+                "stopLossPrice": stop_loss,
+                "trailingJump": 0,
+            }
+            logger.info(f"[☀️ LIVE] Placing super order for {stock_symbol} "
+                        f"(SL {stop_loss} = -{EQUITY_SL_PCT}%, target {target} = +{EQUITY_TARGET_PCT}% of {ref_price})")
+            logger.info(
+                f"Executing → Symbol: {stock_symbol} | Segment: {segment} "
+                f"| QTY: {quantity} | Type: {order_type} | Price: {price} | SL: {stop_loss} | Target: {target}"
+            )
+            return self._place_dhan_order(payload, url=self.SUPER_ORDERS_URL)
 
         payload = {
             "dhanClientId": self.client_id,
@@ -679,6 +716,28 @@ class DhanBroker:
         )
 
         return self._place_dhan_order(payload)
+
+    def _fetch_ltp(self, stock_symbol: str) -> float | None:
+        """Live price from Yahoo Finance (NSE), or None."""
+        try:
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{stock_symbol}.NS?interval=1d&range=1d"
+            headers = {"User-Agent": "Mozilla/5.0"}
+            logger.info(f"Fetching live quote from Yahoo Finance for {stock_symbol}.NS...")
+            t0 = time_mod.perf_counter()
+            resp = requests.get(url, headers=headers, timeout=5)
+            t1 = time_mod.perf_counter()
+            if resp.status_code == 200:
+                data = resp.json()
+                ltp = data.get("chart", {}).get("result", [{}])[0].get("meta", {}).get("regularMarketPrice", 0)
+                if ltp and ltp > 0:
+                    logger.info(f"Fetched LTP: {ltp} in {(t1-t0)*1000:.1f}ms")
+                    return float(ltp)
+                logger.warning("LTP not found in YF response.")
+            else:
+                logger.warning(f"YF returned {resp.status_code}.")
+        except Exception as e:
+            logger.error(f"Failed to fetch live price via YF: {e}")
+        return None
 
     def handle_signal(self, signal: dict) -> dict | None:
         """
@@ -737,6 +796,16 @@ async def connect_and_listen():
     except ImportError:
         logger.error("websockets is required. Install: pip install websockets")
         return
+
+    # Optional SL/target: refuse to run with an incomplete risk setting
+    if EQUITY_SL_TARGET_ENABLED:
+        if EQUITY_SL_PCT <= 0 or EQUITY_TARGET_PCT <= 0:
+            logger.error("EQUITY_SL_TARGET_ENABLED=true needs EQUITY_SL_PCT and EQUITY_TARGET_PCT > 0 "
+                         "(e.g. EQUITY_SL_PCT=2, EQUITY_TARGET_PCT=1). Fix with: bot settings equity")
+            sys.exit(1)
+        logger.info(f"SL/target ON: stop-loss -{EQUITY_SL_PCT}%, target +{EQUITY_TARGET_PCT}% of entry (Dhan super order)")
+    else:
+        logger.info("SL/target OFF (EQUITY_SL_TARGET_ENABLED=false): plain orders, as before.")
 
     # Initialize broker
     dry_run = os.environ.get("DRY_RUN", "true").lower() in ("true", "1", "yes")

@@ -32,6 +32,19 @@ ask_dhan "$ENV" "$OTHER"
 echo
 ask_required AMOUNT "Rupees to invest per share trade" "$(get_env TRADE_AMOUNT_INR "$ENV")"
 set_env TRADE_AMOUNT_INR "$AMOUNT" "$ENV"
+
+echo
+echo " Stop-loss and target (optional): attach both to every live-market buy at Dhan."
+current_sltp=$(get_env EQUITY_SL_TARGET_ENABLED "$ENV" | tr '[:upper:]' '[:lower:]')
+if yes_no "Place a stop-loss and target automatically?" "$([ "$current_sltp" = true ] && echo y || echo n)"; then
+    ask_pct SL_PCT "Stop-loss: % below the entry price (e.g. 2)" "$(get_env EQUITY_SL_PCT "$ENV")"
+    ask_pct TARGET_PCT "Target: % above the entry price" "$(x=$(get_env EQUITY_TARGET_PCT "$ENV"); echo "${x:-1}")"
+    set_env EQUITY_SL_TARGET_ENABLED true "$ENV"
+    set_env EQUITY_SL_PCT "$SL_PCT" "$ENV"
+    set_env EQUITY_TARGET_PCT "$TARGET_PCT" "$ENV"
+else
+    set_env EQUITY_SL_TARGET_ENABLED false "$ENV"
+fi
 [ -n "$(get_env DRY_RUN "$ENV")" ] || set_env DRY_RUN true "$ENV"
 ok "Settings saved to client_agent/.env"
 

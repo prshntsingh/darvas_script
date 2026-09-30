@@ -72,6 +72,21 @@ The bot starts in **TEST mode**: it receives signals and shows what it *would* b
 2. When it looks right, run `bot live equity` and type `YES`.
 3. To go back to test mode at any time: `bot test equity`.
 
+### Stop-loss and target (optional, off by default)
+When this is on, every buy during market hours is placed at Dhan as one order with a **stop-loss and target attached**. Both are fixed percentages of the entry price:
+
+| Setting (`bot settings equity`) | Meaning |
+|---|---|
+| `EQUITY_SL_TARGET_ENABLED` | `true` = on, `false` = off (the default; orders are placed as before) |
+| `EQUITY_SL_PCT` | Stop-loss, % below the entry price. **Required** when on, e.g. `2` |
+| `EQUITY_TARGET_PCT` | Target, % above the entry price. Default `1` |
+
+- **Entry price used:** the limit price sent to Dhan, or the live price for market orders. Example: entry ₹101 with `EQUITY_SL_PCT=2` and a 1% target gives SL ₹99.00 and target ₹102.00.
+- **After-market orders (AMO)** can't carry a stop-loss/target, so they are placed **without** them and the log says so.
+- **Missing live price:** if the live price for a market order isn't available, that order is also placed without them.
+- **Turning it on or off:** `bot setup equity` asks "Place a stop-loss and target automatically?", or change the settings above with `bot settings equity`.
+- **Missing stop-loss %:** if the feature is on but `EQUITY_SL_PCT` is empty, the bot refuses to start and the log says why.
+
 ### Everyday commands
 | Type this | What it does |
 |---|---|

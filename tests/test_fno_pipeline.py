@@ -204,7 +204,7 @@ class FakeBroker(FnOBroker):
         self.protects_on_entry = protects_on_entry
         self._ltp = ltp
         self.fill = fill  # full | none | partial
-        self.entries, self.protections, self.cancelled = [], [], []
+        self.entries, self.protections, self.cancelled, self.status_kinds = [], [], [], []
 
     def connect(self):
         pass
@@ -217,8 +217,9 @@ class FakeBroker(FnOBroker):
         self.entries.append(dict(id=oid, qty=qty, price=price, sl=stop_loss, target=target))
         return oid
 
-    def entry_status(self, order_id):
+    def entry_status(self, order_id, protected=True):
         e = next(e for e in self.entries if e["id"] == order_id)
+        self.status_kinds.append(protected)
         if self.fill == "full":
             return OrderState(COMPLETE, e["qty"], 100.0)
         if self.fill == "partial":
@@ -226,7 +227,7 @@ class FakeBroker(FnOBroker):
             return OrderState(CANCELLED if order_id in self.cancelled else OPEN, filled, 100.0)
         return OrderState(CANCELLED if order_id in self.cancelled else OPEN, 0)
 
-    def cancel_entry(self, order_id):
+    def cancel_entry(self, order_id, protected=True):
         self.cancelled.append(order_id)
 
     def place_protection(self, contract, qty, stop_loss, target, last_price):
@@ -448,3 +449,68 @@ def test_channel_without_fno_flag_behaves_exactly_as_before(pipeline):
     rec = pipeline(POLYCAB, enable_fno=False)
     assert rec.fno_calls == []
     assert rec.broadcasts == []  # equity filter blocks it, as it always did
+
+
+# ---------------------------------------------------------------------------
+# FNO_SL_TARGET_ENABLED=false: plain entry, no SL/targets at the broker
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protects_on_entry", [True, False])  # Dhan-style and Kite-style brokers
+async def test_sl_target_disabled_places_one_plain_entry(tmp_path, resolver, protects_on_entry):
+    broker = FakeBroker(protects_on_entry=protects_on_entry, ltp=100.0)
+    ex, journal = _executor(tmp_path, broker, resolver, sl_target_enabled=False)
+    assert await ex.handle(_payload()) == J.ENTERED
+    assert [(e["qty"], e["sl"], e["target"]) for e in broker.entries] == [(375, None, None)]
+    assert broker.protections == []  # no GTT OCO either
+    assert set(broker.status_kinds) == {False}  # polled as a plain order, not a super order
+    assert journal.get_signal("-100:1")["status"] == J.ENTERED
+
+
+@pytest.mark.asyncio
+async def test_sl_target_enabled_is_the_default(tmp_path, resolver):
+    assert Settings().sl_target_enabled is True
+    broker = FakeBroker(protects_on_entry=True)
+    ex, _ = _executor(tmp_path, broker, resolver)
+    assert await ex.handle(_payload()) == J.PROTECTED
+    assert all(e["sl"] == 30 and e["target"] for e in broker.entries)
+    assert set(broker.status_kinds) == {True}
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_a_disabled_trade_unprotected(tmp_path, resolver):
+    """A trade entered with SL/target off must not get protection after a restart with it on."""
+    broker = FakeBroker(protects_on_entry=False)
+    ex, journal = _executor(tmp_path, broker, resolver)  # flag ON now
+    sid = "-100:10"
+    journal.try_claim(sid, _payload(sid=sid))
+    contract = resolver.resolve("POLYCAB", 8000, "PE", "OCT", today=TODAY)
+    journal.update_signal(sid, J.ENTRY_PLACED, contract=json.dumps(contract.to_dict()),
+                          entry_deadline=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat())
+    oid = broker.place_entry(contract, 375, 105, None, None)
+    journal.add_order(sid, J.ENTRY, oid, 375, 105, None, None, "OPEN")  # entered while flag was OFF
+    await ex.reconcile()
+    assert journal.get_signal(sid)["status"] == J.ENTERED and broker.protections == []
+
+
+def test_dhan_plain_vs_super_order_payloads(monkeypatch):
+    from fno_agent.brokers.dhan import DhanFnOBroker
+    from fno_agent.instruments import Contract
+
+    calls = []
+    broker = DhanFnOBroker("1", access_token="T", dry_run=False)
+    monkeypatch.setattr(broker, "_request", lambda m, path, body=None: calls.append((m, path, body)) or
+                        {"orderId": "9", "orderStatus": "PENDING", "filledQty": 125})
+    c = Contract("POLYCAB", 8000, "PE", date(2026, 10, 27), "NFO", 125, 0.05, security_id="104253",
+                 exchange_segment="NSE_FNO")
+
+    broker.place_entry(c, 125, 105, 30, 500)
+    broker.place_entry(c, 125, 105, None, None)
+    (m1, p1, b1), (m2, p2, b2) = calls
+    assert p1 == "/super/orders" and b1["stopLossPrice"] == 30 and b1["targetPrice"] == 500
+    assert p2 == "/orders" and "stopLossPrice" not in b2 and b2["productType"] == "MARGIN"
+
+    calls.clear()
+    broker.entry_status("9", protected=False)
+    broker.cancel_entry("9", protected=False)
+    assert [(m, p) for m, p, _ in calls] == [("GET", "/orders/9"), ("DELETE", "/orders/9")]

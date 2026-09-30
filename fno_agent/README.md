@@ -26,7 +26,7 @@ Target-500,1000
    4. **Sizing**: `lots = floor(FNO_CAPITAL_PER_TRADE / (lot_size × entry_max))`. If that is 0 lots, the trade is skipped.
    5. **Price check**: skip if LTP is more than `FNO_CHASE_PCT` above the entry range, or already at the SL.
    6. **Entry**: a LIMIT buy at `min(entry_max, LTP + 2 ticks)`. It never uses a market order, because many options are illiquid. Anything unfilled after `FNO_ENTRY_TIMEOUT_SEC` is cancelled.
-   7. **Protection at the broker**, so it still works if the VM is down. Lots are split across the targets, and any remainder goes to the furthest target.
+   7. **Protection at the broker** (optional, on by default via `FNO_SL_TARGET_ENABLED`), so it still works if the VM is down. Lots are split across the targets, and any remainder goes to the furthest target. When it's turned off, the bot places one plain LIMIT buy for the full quantity and no SL/target orders.
       - **Dhan**: one **Super Order** per target tranche, with entry, target leg and SL leg, product `MARGIN` (carry-forward). Dhan Forever/OCO only supports CNC/MTF, so it can't be used for F&O positions carried overnight.
       - **Kite**: one NRML entry, then a **GTT OCO** per tranche after the fill. The SL leg's limit price is `FNO_SL_LIMIT_BUFFER_PCT` below the trigger.
    8. Every step is written to `fno_journal.db`. After a restart, unfinished trades are resumed: the agent checks the fill, cancels on timeout, and places any missing protection.

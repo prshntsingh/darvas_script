@@ -82,7 +82,7 @@ class KiteFnOBroker(FnOBroker):
             return None
 
     def place_entry(self, contract: Contract, qty: int, price: float,
-                    stop_loss: float, target: Optional[float]) -> str:
+                    stop_loss: Optional[float], target: Optional[float]) -> str:
         params = dict(
             variety="regular",
             exchange=contract.exchange,
@@ -101,7 +101,7 @@ class KiteFnOBroker(FnOBroker):
         logger.info(f"Kite entry placed: {order_id}")
         return str(order_id)
 
-    def entry_status(self, order_id: str) -> OrderState:
+    def entry_status(self, order_id: str, protected: bool = True) -> OrderState:
         if order_id.startswith("DRY-"):
             return self._dry_status(order_id)
         history = self._call("order_history", order_id)
@@ -117,7 +117,7 @@ class KiteFnOBroker(FnOBroker):
             message=last.get("status_message") or raw,
         )
 
-    def cancel_entry(self, order_id: str) -> None:
+    def cancel_entry(self, order_id: str, protected: bool = True) -> None:
         if order_id.startswith("DRY-"):
             self._dry_orders[order_id] = 0
             return
