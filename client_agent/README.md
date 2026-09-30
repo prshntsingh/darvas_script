@@ -100,7 +100,7 @@ TRADE_AMOUNT_INR=10000
 DEFAULT_QUANTITY=10
 
 # --- Optional stop-loss + target (off by default) ---
-# true = live-market buys are placed as a Dhan super order with SL and target attached
+# true = after a buy EXECUTES, place SL + target at Dhan (Forever OCO) at % of the executed price
 EQUITY_SL_TARGET_ENABLED=false
 EQUITY_SL_PCT=2          # required when enabled: stop-loss % below entry
 EQUITY_TARGET_PCT=1      # target % above entry
@@ -197,10 +197,11 @@ The client receives JSON signals via WebSocket:
 - **MARKET** orders fetch the exact live real-time price instantly using Yahoo Finance (Dhan) or Kite Connect APIs.
 - **AMO** (After Market Orders) auto-detected: weekends + before 9:15 AM / after 3:15 PM IST
 - **Quantity**: Automatically calculated based on `TRADE_AMOUNT_INR / Price`.
-- **Stop-loss + target (optional)**: with `EQUITY_SL_TARGET_ENABLED=true`, each live-market buy is sent as one **Dhan super order** with a stop-loss and a target attached.
-  - SL = `EQUITY_SL_PCT`% below the entry price; target = `EQUITY_TARGET_PCT`% above it (default 1%).
-  - The entry price is the LIMIT price sent, or the live price for MARKET orders. Prices are rounded to ₹0.05.
-  - **AMO orders** can't carry SL/target and are placed without them, with a warning. The same applies to MARKET orders when no live price is available.
+- **Stop-loss + target (optional)**: with `EQUITY_SL_TARGET_ENABLED=true`, the stop-loss and target are placed **only after the buy executes**, from Dhan's reported **executed price** (`client_agent/equity_protection.py`).
+  - The buy itself is a normal order, live or AMO.
+  - A watcher polls the order at Dhan. When shares execute, it reads `averageTradedPrice` (or falls back to the order's trades). It then places a **Dhan Forever Order (OCO)** for exactly the executed quantity: SL = `EQUITY_SL_PCT`% below, target = `EQUITY_TARGET_PCT`% above (default 1%).
+  - **Orders that never execute get nothing.** Partial fills are protected part by part, and AMO orders are protected once they execute at the open.
+  - Pending orders are saved in `client_agent/.pending_protection.json`, so restarts don't lose them.
   - With the flag off (the default), orders are exactly as before.
 - **Auto-Login**: Dhan logs in with PIN + TOTP.
   - The equity and FnO bots share one token (`~/.dhan_token`), so they don't log each other out.

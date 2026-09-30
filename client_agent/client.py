@@ -32,8 +32,10 @@ from datetime import datetime, time, timedelta, timezone
 
 try:  # imported as client_agent.client (tests, fno_agent)
     from client_agent.dhan_token import fresh_token, is_token_error
+    from client_agent.equity_protection import ProtectionWatcher
 except ImportError:  # run as `python client.py` from client_agent/
     from dhan_token import fresh_token, is_token_error
+    from equity_protection import ProtectionWatcher
 
 # --- Setup Logging ---
 logging.basicConfig(
@@ -79,11 +81,13 @@ ALLOWED_CHANNELS = {c.strip().lower() for c in _RAW_ALLOWED_CHANNELS.split(",")}
 TRADE_AMOUNT_INR = int(os.environ.get("TRADE_AMOUNT_INR", "0"))
 DEFAULT_QUANTITY = int(os.environ.get("DEFAULT_QUANTITY", "1"))
 
-# Optional stop-loss + target (Dhan Super Order), as fixed % of the entry price.
+# Optional stop-loss + target, as fixed % of the EXECUTED price (placed only after the buy executes).
 # Off by default. When on, EQUITY_SL_PCT is required (no default: it's your risk setting).
 EQUITY_SL_TARGET_ENABLED = os.environ.get("EQUITY_SL_TARGET_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 EQUITY_SL_PCT = float(os.environ.get("EQUITY_SL_PCT", "0") or 0)
 EQUITY_TARGET_PCT = float(os.environ.get("EQUITY_TARGET_PCT", "1") or 0)
+# Stop-loss leg sells with a LIMIT this % below its trigger, so it fills in a fast fall
+EQUITY_SL_LIMIT_BUFFER_PCT = float(os.environ.get("EQUITY_SL_LIMIT_BUFFER_PCT", "1") or 0)
 
 # Reconnection settings
 RECONNECT_BASE_DELAY = 1.0    # seconds
@@ -457,10 +461,6 @@ def _is_amo_window() -> bool:
     return now.time() < market_start or now.time() >= market_end
 
 
-def _round_tick(price: float, tick: float = 0.05) -> float:
-    return float(f"{round(price / tick) * tick:.2f}")
-
-
 class DhanBroker:
     """
     Broker execution layer using Dhan HQ REST API.
@@ -470,7 +470,6 @@ class DhanBroker:
     """
 
     ORDERS_URL = "https://api.dhan.co/v2/orders"
-    SUPER_ORDERS_URL = "https://api.dhan.co/v2/super/orders"
 
     def __init__(self, client_id: str, access_token: str, pin: str = "", totp_secret: str = "", dry_run: bool = True):
         self.client_id = client_id
@@ -479,6 +478,7 @@ class DhanBroker:
         self.totp_secret = totp_secret
         self.dry_run = dry_run
         self._scrips = DhanScripMap()
+        self.watcher = None  # ProtectionWatcher when EQUITY_SL_TARGET_ENABLED
 
     PROFILE_URL = "https://api.dhan.co/v2/profile"
 
@@ -552,7 +552,7 @@ class DhanBroker:
         }
 
     def _place_dhan_order(self, payload: dict, is_retry: bool = False, url: str | None = None) -> dict | None:
-        """Send an order to Dhan v2 API (plain order, or super order when url=SUPER_ORDERS_URL)."""
+        """Send an order to Dhan v2 API."""
         url = url or self.ORDERS_URL
         if self.dry_run:
             logger.info(f"[DRY RUN] Would send Dhan order: {json.dumps(payload, indent=2)}")
@@ -595,6 +595,64 @@ class DhanBroker:
             logger.error(f"Dhan API error: {e}")
             return None
 
+    # --- API helpers used by the SL/target watcher ------------------------------------
+
+    def _api(self, method: str, path: str, body: dict | None = None, is_retry: bool = False):
+        """Dhan v2 call with the same token self-healing as orders. Returns (status_code, json)."""
+        response = requests.request(method, f"https://api.dhan.co/v2{path}", headers=self._build_headers(),
+                                    json=body, timeout=10)
+        try:
+            data = response.json() if response.text else {}
+        except ValueError:
+            data = {"raw": response.text}
+        if is_token_error(response.status_code, data) and not is_retry and self.pin and self.totp_secret:
+            if self._auto_login(rejected=self.access_token):
+                return self._api(method, path, body, is_retry=True)
+        return response.status_code, data
+
+    def order_status(self, order_id: str) -> dict | None:
+        """Order as Dhan reports it (orderStatus, filledQty, averageTradedPrice)."""
+        code, data = self._api("GET", f"/orders/{order_id}")
+        if isinstance(data, list):
+            data = data[0] if data else {}
+        return data if code == 200 and isinstance(data, dict) and data.get("orderId") else None
+
+    def trades_avg_price(self, order_id: str) -> float | None:
+        """Quantity-weighted executed price from the order's trades (fallback for averageTradedPrice)."""
+        code, data = self._api("GET", f"/trades/{order_id}")
+        trades = data if isinstance(data, list) else [data]
+        qty = sum(int(t.get("tradedQuantity") or 0) for t in trades if isinstance(t, dict))
+        value = sum(float(t.get("tradedPrice") or 0) * int(t.get("tradedQuantity") or 0)
+                    for t in trades if isinstance(t, dict))
+        return round(value / qty, 4) if code == 200 and qty else None
+
+    def place_forever_oco(self, rec: dict, qty: int, target: float, sl: float, sl_limit: float) -> dict | None:
+        """SELL Forever Order (OCO) protecting `qty` executed shares: target leg + stop-loss leg."""
+        payload = {
+            "dhanClientId": self.client_id,
+            "correlationId": str(uuid.uuid4())[:30],
+            "orderFlag": "OCO",
+            "transactionType": "SELL",
+            "exchangeSegment": rec["segment"],
+            "productType": "CNC",
+            "orderType": "LIMIT",
+            "validity": "DAY",
+            "securityId": str(rec["security_id"]),
+            "quantity": int(qty),         # target leg
+            "price": target,
+            "triggerPrice": target,
+            "price1": sl_limit,           # stop-loss leg: triggers at sl, sells with a limit just below
+            "triggerPrice1": sl,
+            "quantity1": int(qty),
+            "disclosedQuantity": 0,
+        }
+        logger.info(f"Placing Dhan Forever OCO: {json.dumps(payload)}")
+        code, data = self._api("POST", "/forever/orders", payload)
+        if code == 200 and data.get("orderId") and str(data.get("orderStatus", "")).upper() != "REJECTED":
+            return {"order_id": data["orderId"], "status": data.get("orderStatus")}
+        logger.error(f"Dhan Forever OCO rejected (HTTP {code}): {data}")
+        return None
+
     def place_order(self, signal: dict) -> dict | None:
         """
         Place a BUY equity order on Dhan based on the trade signal.
@@ -632,11 +690,9 @@ class DhanBroker:
             order_type = "MARKET"
             price = 0.0
 
-        protect = EQUITY_SL_TARGET_ENABLED
-
-        # --- Live price (MARKET orders): needed for quantity and/or SL/target ---
+        # --- Live price (MARKET orders): needed for quantity ---
         ltp = None
-        if order_type == "MARKET" and (TRADE_AMOUNT_INR > 0 or protect):
+        if order_type == "MARKET" and TRADE_AMOUNT_INR > 0:
             ltp = self._fetch_ltp(stock_symbol)
 
         # --- Capital Allocation & Quantity Calculation ---
@@ -650,43 +706,6 @@ class DhanBroker:
             else:
                 quantity = max(1, DEFAULT_QUANTITY)
                 logger.warning(f"No live price. Using DEFAULT_QUANTITY: {quantity}")
-
-        # --- Optional stop-loss + target (Dhan Super Order) ---
-        # Base = the LIMIT price sent (worst-case fill), or the live price for MARKET orders.
-        ref_price = price if order_type == "LIMIT" else ltp
-        if protect and use_amo:
-            logger.warning(f"[🌙 AMO] SL/target can't be attached to an after-market order. "
-                           f"Placing {stock_symbol} WITHOUT SL/target.")
-            protect = False
-        elif protect and not ref_price:
-            logger.warning(f"No price to compute SL/target for {stock_symbol} (live price unavailable). "
-                           f"Placing order WITHOUT SL/target.")
-            protect = False
-
-        if protect:
-            stop_loss = _round_tick(ref_price * (1 - EQUITY_SL_PCT / 100))
-            target = _round_tick(ref_price * (1 + EQUITY_TARGET_PCT / 100))
-            payload = {
-                "dhanClientId": self.client_id,
-                "correlationId": str(uuid.uuid4())[:30],
-                "transactionType": "BUY",
-                "exchangeSegment": segment,
-                "productType": product_type,
-                "orderType": order_type,
-                "securityId": str(scrip_id),
-                "quantity": quantity,
-                "price": price,
-                "targetPrice": target,
-                "stopLossPrice": stop_loss,
-                "trailingJump": 0,
-            }
-            logger.info(f"[☀️ LIVE] Placing super order for {stock_symbol} "
-                        f"(SL {stop_loss} = -{EQUITY_SL_PCT}%, target {target} = +{EQUITY_TARGET_PCT}% of {ref_price})")
-            logger.info(
-                f"Executing → Symbol: {stock_symbol} | Segment: {segment} "
-                f"| QTY: {quantity} | Type: {order_type} | Price: {price} | SL: {stop_loss} | Target: {target}"
-            )
-            return self._place_dhan_order(payload, url=self.SUPER_ORDERS_URL)
 
         payload = {
             "dhanClientId": self.client_id,
@@ -715,7 +734,14 @@ class DhanBroker:
             f"| QTY: {quantity} | Type: {order_type} | Price: {price}"
         )
 
-        return self._place_dhan_order(payload)
+        result = self._place_dhan_order(payload)
+
+        # --- Optional SL/target: placed by the watcher only AFTER this buy executes, at a % of the
+        # executed price Dhan reports (AMO orders included: protected once they fill at the open) ---
+        if self.watcher and result and result.get("order_id") and result.get("status") != "REJECTED":
+            self.watcher.track(str(result["order_id"]), stock_symbol, scrip_id, segment, quantity,
+                               dry_price=(price or ltp) if self.dry_run else None)
+        return result
 
     def _fetch_ltp(self, stock_symbol: str) -> float | None:
         """Live price from Yahoo Finance (NSE), or None."""
@@ -803,7 +829,8 @@ async def connect_and_listen():
             logger.error("EQUITY_SL_TARGET_ENABLED=true needs EQUITY_SL_PCT and EQUITY_TARGET_PCT > 0 "
                          "(e.g. EQUITY_SL_PCT=2, EQUITY_TARGET_PCT=1). Fix with: bot settings equity")
             sys.exit(1)
-        logger.info(f"SL/target ON: stop-loss -{EQUITY_SL_PCT}%, target +{EQUITY_TARGET_PCT}% of entry (Dhan super order)")
+        logger.info(f"SL/target ON: stop-loss -{EQUITY_SL_PCT}%, target +{EQUITY_TARGET_PCT}% of the EXECUTED price, "
+                    f"placed at Dhan (Forever OCO) only after each buy executes")
     else:
         logger.info("SL/target OFF (EQUITY_SL_TARGET_ENABLED=false): plain orders, as before.")
 
@@ -815,6 +842,14 @@ async def connect_and_listen():
         logger.info("Running in DRY RUN mode. Orders will be simulated.")
     else:
         logger.warning(f"Running in LIVE mode. Orders WILL be placed on {BROKER.upper()}.")
+
+    if EQUITY_SL_TARGET_ENABLED:
+        if isinstance(broker, DhanBroker):
+            broker.watcher = ProtectionWatcher(broker, EQUITY_SL_PCT, EQUITY_TARGET_PCT,
+                                               EQUITY_SL_LIMIT_BUFFER_PCT, dry_run=dry_run)
+            asyncio.create_task(broker.watcher.run(lambda: not _is_amo_window()))
+        else:
+            logger.warning("EQUITY_SL_TARGET_ENABLED is only supported with BROKER=dhan; ignoring it.")
 
     delay = RECONNECT_BASE_DELAY
 

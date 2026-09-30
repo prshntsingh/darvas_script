@@ -27,9 +27,12 @@ Target-500,1000
    5. **Price check**: skip if LTP is more than `FNO_CHASE_PCT` above the entry range.
    6. **Entry**: a LIMIT buy at `min(entry_max, LTP + 2 ticks)`. It never uses a market order, because many options are illiquid. Anything unfilled after `FNO_ENTRY_TIMEOUT_SEC` is cancelled.
    7. **Protection at the broker** (optional, on by default via `FNO_SL_TARGET_ENABLED`), so it still works if the VM is down.
-      - **Levels**: stop-loss = entry − `FNO_SL_PCT`% and one target = entry + `FNO_TARGET_PCT`%, both **3% by default**. The entry is the LIMIT price sent. SL rounds down and target rounds up to the tick. The message's own SL/targets are ignored.
-      - **Dhan**: one **Super Order** (entry + target leg + SL leg) for the whole quantity, product `MARGIN` (carry-forward). Dhan Forever/OCO only supports CNC/MTF, so it can't be used for F&O positions carried overnight.
-      - **Kite**: one NRML entry, then one **GTT OCO** after the fill. The SL leg's limit price is `FNO_SL_LIMIT_BUFFER_PCT` below the trigger.
+      - **Levels**: stop-loss = executed − `FNO_SL_PCT`% and one target = executed + `FNO_TARGET_PCT`%, both **3% by default**. "Executed" is the **average executed price reported by the broker**, never a guess. SL rounds down and target rounds up to the tick. The message's own SL/targets are ignored.
+      - **Dhan**: one **Super Order** (entry + target leg + SL leg) for the whole quantity, product `MARGIN` (carry-forward).
+        - The legs only act once the entry executes, and are cancelled with it if it doesn't.
+        - As soon as Dhan reports the fill, the bot **moves both legs to ±X% of Dhan's `averageTradedPrice`**. If Dhan doesn't report the price, or the move fails after 3 tries, you get an alert.
+        - Dhan Forever/OCO only supports CNC/MTF, which is why options use this route.
+      - **Kite**: one NRML entry. **Only after the fill**, one **GTT OCO** at ±X% of Kite's `average_price`. If there's no executed price, nothing is placed and you get an `UNPROTECTED` alert. The SL leg's limit price is `FNO_SL_LIMIT_BUFFER_PCT` below the trigger.
       - When it's turned off, the bot places one plain LIMIT buy and no SL/target orders.
    8. Every step is written to `fno_journal.db`. After a restart, unfinished trades are resumed: the agent checks the fill, cancels on timeout, and places any missing protection.
    9. Every event goes to Telegram (`FNO_TG_BOT_TOKEN`, `FNO_TG_CHAT_ID`), plus a 09:00 heartbeat.
@@ -57,8 +60,8 @@ The equity client (`client_agent/`) ignores FNO signals, so both can run side by
 | `FNO_CAPITAL_PER_TRADE` | — | Rupees per trade. The bot buys as many whole lots as fit |
 | `FNO_MAX_LOTS` | `0` | Cap on lots per trade (`0` = no cap; the VM setup suggests `1` while testing) |
 | `FNO_SL_TARGET_ENABLED` | `true` | Place a stop-loss and target at the broker. `false` = one plain buy, and you manage exits yourself |
-| `FNO_SL_PCT` | `3` | Stop-loss % below the entry price |
-| `FNO_TARGET_PCT` | `3` | Target % above the entry price |
+| `FNO_SL_PCT` | `3` | Stop-loss % below the executed price (reported by the broker) |
+| `FNO_TARGET_PCT` | `3` | Target % above the executed price (reported by the broker) |
 | `FNO_CHASE_PCT` | `3` | Skip if the price is already this % above the entry range |
 | `FNO_ENTRY_TIMEOUT_SEC` | `300` | Cancel an unfilled entry after this long |
 | `FNO_MIN_DAYS_TO_EXPIRY` | `1` | Never buy a contract expiring sooner than this |

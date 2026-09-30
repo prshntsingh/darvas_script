@@ -62,6 +62,10 @@ class Journal:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(_SCHEMA)
+        # Migration: executed (average) price reported by the broker
+        cols = {r["name"] for r in self._conn.execute("PRAGMA table_info(signals)")}
+        if "avg_price" not in cols:
+            self._conn.execute("ALTER TABLE signals ADD COLUMN avg_price REAL")
         self._lock = threading.Lock()
 
     def _exec(self, sql: str, params=()) -> sqlite3.Cursor:
@@ -111,6 +115,10 @@ class Journal:
             (signal_id, kind, broker_order_id, qty, price, stop_loss, target, status, _now(), _now()),
         )
         return cur.lastrowid
+
+    def update_order_levels(self, order_row_id: int, stop_loss: float, target: float):
+        self._exec("UPDATE orders SET stop_loss=?, target=?, updated_at=? WHERE id=?",
+                   (stop_loss, target, _now(), order_row_id))
 
     def update_order(self, order_row_id: int, status: str, filled_qty: int):
         self._exec("UPDATE orders SET status=?, filled_qty=?, updated_at=? WHERE id=?",

@@ -1,8 +1,11 @@
 """
 FnO signal execution: validate → resolve contract → size → LIMIT entry → wait for fill → broker-side SL/target.
 
-SL/target are always a fixed % of the entry (LIMIT) price: FNO_SL_PCT / FNO_TARGET_PCT (default 3% each).
-The signal's own SL/targets are ignored.
+SL/target are a fixed % of the EXECUTED price reported by the broker: FNO_SL_PCT / FNO_TARGET_PCT
+(default 3% each). The signal's own SL/targets are ignored. Nothing acts unless the entry executes:
+- Dhan: super order; its legs only act once the entry executes (and are cancelled with it). After the
+  fill, both legs are moved to ±X% of Dhan's averageTradedPrice.
+- Kite: plain entry; after the fill, a GTT OCO at ±X% of Kite's average_price.
 
 Every step is written to the journal so a crash mid-trade can be resumed by reconcile().
 """
@@ -218,8 +221,8 @@ class FnOExecutor:
                                      f"{self.s.entry_timeout_sec}s; entry cancelled [{sid}]")
             return J.CANCELLED
 
-        self.journal.update_signal(sid, J.FILLED, filled_qty=filled)
-        avg = next((st.avg_price for st in states.values() if st.avg_price), None)
+        avg = await self._executed_price(entries, states)
+        self.journal.update_signal(sid, J.FILLED, filled_qty=filled, avg_price=avg)
 
         if entries[0]["stop_loss"] is None:  # SL/target disabled when this trade was entered
             self.journal.update_signal(sid, J.ENTERED, "SL/target disabled")
@@ -228,12 +231,69 @@ class FnOExecutor:
             return J.ENTERED
 
         if self.broker.protects_on_entry:
-            self.journal.update_signal(sid, J.PROTECTED)
-            await self.notifier.send(f"✅ Filled {filled} x {contract.describe()} avg {avg or '?'}; "
-                                     f"SL/target legs live at {self.broker.name} [{sid}]")
-            return J.PROTECTED
+            return await self._reanchor(sid, contract, entries, states, filled, avg)
 
         return await self._protect(sid, sig, contract, filled, avg)
+
+    async def _executed_price(self, entries, states: Dict[int, OrderState]) -> Optional[float]:
+        """Quantity-weighted average executed price, as reported by the broker (None if unknown)."""
+        value, qty = 0.0, 0
+        for e in entries:
+            st = states[e["id"]]
+            if not st.filled_qty:
+                continue
+            price = st.avg_price or await asyncio.to_thread(
+                self.broker.executed_price, e["broker_order_id"], e["target"] is not None)
+            if not price:
+                return None  # never guess: part of the fill has no broker-reported price
+            value += price * st.filled_qty
+            qty += st.filled_qty
+        return round(value / qty, 4) if qty else None
+
+    async def _reanchor(self, sid: str, contract: Contract, entries, states: Dict[int, OrderState],
+                        filled: int, avg: Optional[float]) -> str:
+        """Dhan super order filled: move its SL/target legs to ±X% of the executed price."""
+        limit = entries[0]["price"]
+        if avg is None:
+            self.journal.update_signal(sid, J.PROTECTED, "executed price unavailable; legs at limit-based levels")
+            await self.notifier.send(
+                f"⚠️ Filled {filled} x {contract.describe()}, but {self.broker.name} did not report the executed "
+                f"price. SL/target legs stay at ±% of the limit {limit} (SL {entries[0]['stop_loss']}, "
+                f"T {entries[0]['target']}). Check them in the app. [{sid}]")
+            return J.PROTECTED
+
+        sl, targets = levels(avg, contract, self.s.sl_pct, self.s.target_pct)
+        errors = []
+        for e in entries:
+            st = states[e["id"]]
+            if not st.filled_qty:
+                continue
+            if st.message == "CLOSED":  # a leg already executed before we could move it
+                continue
+            for attempt in range(3):
+                try:
+                    await asyncio.to_thread(self.broker.modify_protection, e["broker_order_id"], sl, targets[0])
+                    self.journal.update_order_levels(e["id"], sl, targets[0])
+                    break
+                except Exception as ex:
+                    if attempt == 2:
+                        errors.append(f"{e['broker_order_id']}: {ex}")
+                    else:
+                        await self.sleep(1)
+
+        if errors:
+            self.journal.update_signal(sid, J.PROTECTED, f"legs not moved to executed price: {'; '.join(errors)}")
+            await self.notifier.send(
+                f"🚨 Filled {filled} x {contract.describe()} @ {avg}, but the SL/target legs could not be moved "
+                f"to SL {sl} / T {targets[0]}. They are still at SL {entries[0]['stop_loss']} / "
+                f"T {entries[0]['target']} (from the limit {limit}). Fix in the Dhan app! {errors} [{sid}]")
+            return J.PROTECTED
+
+        self.journal.update_signal(sid, J.PROTECTED)
+        await self.notifier.send(
+            f"✅ Filled {filled} x {contract.describe()} @ {avg} (executed, from {self.broker.name}); "
+            f"SL {sl} (-{self.s.sl_pct:g}%) / T {targets[0]} (+{self.s.target_pct:g}%) set at {self.broker.name} [{sid}]")
+        return J.PROTECTED
 
     async def _poll_until(self, entries, deadline: datetime) -> Dict[int, OrderState]:
         states: Dict[int, OrderState] = {e["id"]: OrderState("OPEN") for e in entries}
@@ -270,12 +330,17 @@ class FnOExecutor:
 
     async def _protect(self, sid: str, sig: FnOSignal, contract: Contract, filled: int,
                        avg: Optional[float]) -> str:
-        # Same levels as at entry: SL/target from the entry (LIMIT) price stored on the entry row
-        entry_price = self.journal.orders_for(sid, J.ENTRY)[0]["price"]
-        sl, targets = levels(entry_price, contract, self.s.sl_pct, self.s.target_pct)
+        """Kite: after the fill, a GTT OCO at ±X% of the executed price reported by the broker."""
+        if avg is None:
+            self.journal.update_signal(sid, J.UNPROTECTED, "executed price unavailable")
+            await self.notifier.send(f"🚨 UNPROTECTED: filled {filled} x {contract.describe()} but "
+                                     f"{self.broker.name} did not report the executed price, so no SL/target "
+                                     f"was placed. Place them manually! [{sid}]")
+            return J.UNPROTECTED
+        sl, targets = levels(avg, contract, self.s.sl_pct, self.s.target_pct)
         tranches = split_tranches(filled // contract.lot_size, targets)
         done = self.journal.orders_for(sid, J.PROTECTION)  # already placed before a crash
-        last_price = await asyncio.to_thread(self.broker.ltp, contract) or avg or sig.entry_max
+        last_price = await asyncio.to_thread(self.broker.ltp, contract) or avg
 
         errors = []
         for lots, tgt in tranches[len(done):]:
@@ -294,8 +359,8 @@ class FnOExecutor:
 
         self.journal.update_signal(sid, J.PROTECTED)
         await self.notifier.send(
-            f"✅ Filled {filled} x {contract.describe()} avg {avg or '?'}; OCO SL {sl} / targets "
-            f"{[f'{l} lot@{t}' for l, t in tranches]} [{sid}]")
+            f"✅ Filled {filled} x {contract.describe()} @ {avg} (executed, from {self.broker.name}); "
+            f"OCO SL {sl} (-{self.s.sl_pct:g}%) / T {targets[0]} (+{self.s.target_pct:g}%) [{sid}]")
         return J.PROTECTED
 
     # ------------------------------------------------------------------

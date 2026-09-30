@@ -208,12 +208,16 @@ def test_round_to_tick_and_market_hours():
 class FakeBroker(FnOBroker):
     name = "fake"
 
-    def __init__(self, protects_on_entry=True, ltp=100.0, fill="full"):
+    def __init__(self, protects_on_entry=True, ltp=100.0, fill="full", fill_price=99.4, raw_status=""):
         super().__init__(dry_run=False)
         self.protects_on_entry = protects_on_entry
         self._ltp = ltp
         self.fill = fill  # full | none | partial
+        self.fill_price = fill_price  # executed price the "broker" reports (None = not reported)
+        self.raw_status = raw_status  # e.g. "CLOSED": a Dhan leg already executed
+        self.modify_fails = 0
         self.entries, self.protections, self.cancelled, self.status_kinds = [], [], [], []
+        self.modified = []
 
     def connect(self):
         pass
@@ -230,10 +234,10 @@ class FakeBroker(FnOBroker):
         e = next(e for e in self.entries if e["id"] == order_id)
         self.status_kinds.append(protected)
         if self.fill == "full":
-            return OrderState(COMPLETE, e["qty"], 100.0)
+            return OrderState(COMPLETE, e["qty"], self.fill_price, self.raw_status)
         if self.fill == "partial":
             filled = e["qty"] // 3  # 1 of 3 lots
-            return OrderState(CANCELLED if order_id in self.cancelled else OPEN, filled, 100.0)
+            return OrderState(CANCELLED if order_id in self.cancelled else OPEN, filled, self.fill_price)
         return OrderState(CANCELLED if order_id in self.cancelled else OPEN, 0)
 
     def cancel_entry(self, order_id, protected=True):
@@ -242,6 +246,12 @@ class FakeBroker(FnOBroker):
     def place_protection(self, contract, qty, stop_loss, target, last_price):
         self.protections.append(dict(qty=qty, sl=stop_loss, target=target, last_price=last_price))
         return f"G{len(self.protections)}"
+
+    def modify_protection(self, order_id, stop_loss, target):
+        if self.modify_fails:
+            self.modify_fails -= 1
+            raise RuntimeError("Dhan said no")
+        self.modified.append((order_id, stop_loss, target))
 
 
 async def _no_sleep(_):
@@ -267,9 +277,12 @@ async def test_executor_dhan_style_places_one_super_order_at_percent_levels(tmp_
     broker = FakeBroker(protects_on_entry=True, ltp=100.0)
     ex, journal = _executor(tmp_path, broker, resolver)
     assert await ex.handle(_payload()) == J.PROTECTED
-    # limit = min(105, 100 + 2 ticks) = 100.1; SL -3% = 97.097 -> 97.05 (down), T +3% = 103.103 -> 103.15 (up)
+    # Super order at limit 100.1 (legs only act once the entry executes): SL 97.05 / T 103.15 ...
     # The signal's own SL 30 / targets 500,1000 are ignored.
     assert [(e["qty"], e["price"], e["sl"], e["target"]) for e in broker.entries] == [(375, 100.1, 97.05, 103.15)]
+    # ... then moved to ±3% of the EXECUTED price Dhan reports (99.4): SL 96.40 / T 102.40
+    assert broker.modified == [("E1", 96.4, 102.4)]
+    assert journal.get_signal("-100:1")["avg_price"] == 99.4
     assert journal.get_signal("-100:1")["filled_qty"] == 375
 
 
@@ -279,7 +292,8 @@ async def test_executor_kite_style_entry_then_oco(tmp_path, resolver):
     ex, _ = _executor(tmp_path, broker, resolver)
     assert await ex.handle(_payload()) == J.PROTECTED
     assert [(e["qty"], e["target"]) for e in broker.entries] == [(375, None)]
-    assert [(p["qty"], p["sl"], p["target"]) for p in broker.protections] == [(375, 97.05, 103.15)]
+    # GTT placed only after the fill, at ±3% of the executed price 99.4 (not the limit 100.1)
+    assert [(p["qty"], p["sl"], p["target"]) for p in broker.protections] == [(375, 96.4, 102.4)]
 
 
 @pytest.mark.asyncio
@@ -288,7 +302,7 @@ async def test_executor_partial_fill_timeout_protects_filled_only(tmp_path, reso
     ex, journal = _executor(tmp_path, broker, resolver, entry_timeout_sec=0)
     assert await ex.handle(_payload()) == J.PROTECTED
     assert broker.cancelled == ["E1"]
-    assert [(p["qty"], p["target"]) for p in broker.protections] == [(125, 103.15)]
+    assert [(p["qty"], p["target"]) for p in broker.protections] == [(125, 102.4)]
     assert journal.get_signal("-100:1")["filled_qty"] == 125
 
 
@@ -338,8 +352,8 @@ async def test_reconcile_resumes_protection_after_crash(tmp_path, resolver):
 
     await ex.reconcile()
     assert journal.get_signal(sid)["status"] == J.PROTECTED
-    # Levels from the journaled entry price 105: SL 101.85, T 108.15
-    assert [(p["qty"], p["sl"], p["target"]) for p in broker.protections] == [(375, 101.85, 108.15)]
+    # Levels from the executed price the broker reports (99.4), not the limit 105
+    assert [(p["qty"], p["sl"], p["target"]) for p in broker.protections] == [(375, 96.4, 102.4)]
 
 
 # ---------------------------------------------------------------------------
@@ -482,6 +496,7 @@ async def test_sl_target_enabled_is_the_default(tmp_path, resolver):
     ex, _ = _executor(tmp_path, broker, resolver)
     assert await ex.handle(_payload()) == J.PROTECTED
     assert [(e["sl"], e["target"]) for e in broker.entries] == [(97.05, 103.15)]
+    assert broker.modified == [("E1", 96.4, 102.4)]
     assert set(broker.status_kinds) == {True}
 
 
@@ -538,8 +553,8 @@ async def test_custom_percentages_and_signal_without_sl_target(tmp_path, resolve
     broker = FakeBroker(protects_on_entry=True, ltp=100.0)
     ex, _ = _executor(tmp_path, broker, resolver, sl_pct=10, target_pct=20)
     assert await ex.handle(_payload(text="#POLYCAB 8000 PE OCT @90-105")) == J.PROTECTED
-    # limit 100.1: SL -10% = 90.09 -> 90.05; T +20% = 120.12 -> 120.15
-    assert [(e["sl"], e["target"]) for e in broker.entries] == [(90.05, 120.15)]
+    # executed 99.4: SL -10% = 89.46 -> 89.45; T +20% = 119.28 -> 119.30
+    assert broker.modified == [("E1", 89.45, 119.3)]
 
 
 def test_levels_stay_strictly_around_cheap_premiums():
@@ -563,3 +578,80 @@ def test_broadcaster_sends_option_signal_without_sl_target(pipeline):
     rec = pipeline("#LT 3900PE @80")
     assert [b["asset_class"] for b in rec.broadcasts] == ["FNO"] and rec.equity_calls == []
     assert (rec.broadcasts[0]["stop_loss"], rec.broadcasts[0]["targets"]) == (None, [])
+
+
+
+# ---------------------------------------------------------------------------
+# SL/target from the EXECUTED price only, and only after execution
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protects_on_entry", [True, False])
+async def test_nothing_is_placed_or_moved_when_the_entry_does_not_execute(tmp_path, resolver, protects_on_entry):
+    broker = FakeBroker(protects_on_entry=protects_on_entry, fill="none")
+    ex, _ = _executor(tmp_path, broker, resolver, entry_timeout_sec=0)
+    assert await ex.handle(_payload()) == J.CANCELLED
+    assert broker.protections == [] and broker.modified == []
+
+
+@pytest.mark.asyncio
+async def test_kite_without_broker_reported_price_places_nothing_and_alerts(tmp_path, resolver):
+    broker = FakeBroker(protects_on_entry=False, fill_price=None)
+    ex, journal = _executor(tmp_path, broker, resolver)
+    assert await ex.handle(_payload()) == J.UNPROTECTED
+    assert broker.protections == []  # never guessed from the limit price
+
+
+@pytest.mark.asyncio
+async def test_dhan_without_broker_reported_price_keeps_legs_and_warns(tmp_path, resolver):
+    broker = FakeBroker(protects_on_entry=True, fill_price=None)
+    ex, journal = _executor(tmp_path, broker, resolver)
+    assert await ex.handle(_payload()) == J.PROTECTED
+    assert broker.modified == []
+    assert "executed price unavailable" in journal.get_signal("-100:1")["reason"]
+
+
+@pytest.mark.asyncio
+async def test_dhan_leg_move_is_retried_then_reported(tmp_path, resolver):
+    broker = FakeBroker(protects_on_entry=True)
+    broker.modify_fails = 2  # third attempt succeeds
+    ex, _ = _executor(tmp_path, broker, resolver)
+    assert await ex.handle(_payload()) == J.PROTECTED
+    assert broker.modified == [("E1", 96.4, 102.4)]
+
+    broker = FakeBroker(protects_on_entry=True)
+    broker.modify_fails = 5  # never succeeds
+    ex, journal = _executor(tmp_path, broker, resolver, db="fail.db")
+    assert await ex.handle(_payload(sid="z")) == J.PROTECTED
+    assert "not moved to executed price" in journal.get_signal("z")["reason"]
+
+
+@pytest.mark.asyncio
+async def test_dhan_leg_already_executed_is_not_touched(tmp_path, resolver):
+    broker = FakeBroker(protects_on_entry=True, raw_status="CLOSED")
+    ex, _ = _executor(tmp_path, broker, resolver)
+    assert await ex.handle(_payload()) == J.PROTECTED
+    assert broker.modified == []
+
+
+def test_dhan_modify_and_trades_fallback(monkeypatch):
+    from fno_agent.brokers.dhan import DhanFnOBroker
+
+    broker = DhanFnOBroker("1", access_token="T", dry_run=False)
+    calls = []
+
+    def fake_request(method, path, body=None):
+        calls.append((method, path, body))
+        if path.startswith("/super/orders") and method == "GET":
+            return [{"orderId": "9", "orderStatus": "TRADED", "filledQty": 250, "averageTradedPrice": 0}]
+        if path == "/trades/9":
+            return [{"tradedPrice": 99.0, "tradedQuantity": 125}, {"tradedPrice": 100.0, "tradedQuantity": 125}]
+        return {"orderId": "9", "orderStatus": "TRADED"}
+
+    monkeypatch.setattr(broker, "_request", fake_request)
+    assert broker.executed_price("9") == 99.5  # weighted average of the trades
+    calls.clear()
+    broker.modify_protection("9", 96.5, 102.5)
+    assert [(m, p, b["legName"]) for m, p, b in calls] == [
+        ("PUT", "/super/orders/9", "TARGET_LEG"), ("PUT", "/super/orders/9", "STOP_LOSS_LEG")]
+    assert calls[0][2]["targetPrice"] == 102.5 and calls[1][2]["stopLossPrice"] == 96.5

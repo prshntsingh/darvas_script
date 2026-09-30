@@ -211,6 +211,38 @@ class DhanFnOBroker(FnOBroker):
                 )
         raise BrokerError(f"Dhan super order {order_id} not found")
 
+    def executed_price(self, order_id: str, protected: bool = True) -> Optional[float]:
+        """Dhan's averageTradedPrice; falls back to the order's trades (weighted average)."""
+        price = super().executed_price(order_id, protected)
+        if price or order_id.startswith("DRY-"):
+            return price
+        try:
+            data = self._request("GET", f"/trades/{order_id}")
+        except BrokerError as e:
+            logger.warning(f"Dhan trades for {order_id} unavailable: {e}")
+            return None
+        trades = data if isinstance(data, list) else [data]
+        qty = sum(int(t.get("tradedQuantity") or 0) for t in trades)
+        value = sum(float(t.get("tradedPrice") or 0) * int(t.get("tradedQuantity") or 0) for t in trades)
+        return round(value / qty, 4) if qty else None
+
+    def modify_protection(self, order_id: str, stop_loss: float, target: float) -> None:
+        """Move a super order's target and stop-loss legs (allowed once the entry is TRADED)."""
+        legs = [
+            {"dhanClientId": self.client_id, "orderId": str(order_id), "legName": "TARGET_LEG",
+             "targetPrice": target},
+            {"dhanClientId": self.client_id, "orderId": str(order_id), "legName": "STOP_LOSS_LEG",
+             "stopLossPrice": stop_loss, "trailingJump": 0},
+        ]
+        for body in legs:
+            if self.dry_run or order_id.startswith("DRY-"):
+                logger.info(f"[DRY RUN] dhan modify super order {order_id}: {body}")
+                continue
+            data = self._request("PUT", f"/super/orders/{order_id}", body)
+            if str(data.get("orderStatus", "")).upper() == "REJECTED":
+                raise BrokerError(f"Dhan rejected {body['legName']} change: {data}")
+        logger.info(f"Dhan super order {order_id}: SL -> {stop_loss}, target -> {target}")
+
     def cancel_entry(self, order_id: str, protected: bool = True) -> None:
         if order_id.startswith("DRY-"):
             self._dry_orders[order_id] = 0

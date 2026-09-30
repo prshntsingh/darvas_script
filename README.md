@@ -20,7 +20,7 @@ Telegram ──► Broadcaster (main.py, Railway) ──wss──► Equity bot 
 | Signals from | Channels with `"enable_trading": true` | Channels with `"enable_fno_trading": true` |
 | Example signal | `Buy #SBIN @ 805-810` | `#POLYCAB 8000 PE OCT @90-105 / SL-30 / Target-500,1000` |
 | Sizing | `TRADE_AMOUNT_INR` ÷ price | Whole lots that fit `FNO_CAPITAL_PER_TRADE` |
-| Stop-loss / target | **Optional**, off by default: `EQUITY_SL_TARGET_ENABLED` places fixed-% SL (`EQUITY_SL_PCT`) and target (`EQUITY_TARGET_PCT`, default 1%) as a Dhan super order | **Optional**, on by default: `FNO_SL_TARGET_ENABLED` places SL `FNO_SL_PCT` (default 3%) below and one target `FNO_TARGET_PCT` (default 3%) above the entry at the broker |
+| Stop-loss / target | **Optional**, off by default (`EQUITY_SL_TARGET_ENABLED`). **Only after the buy executes**, a Dhan Forever OCO is placed at SL −`EQUITY_SL_PCT`% / target +`EQUITY_TARGET_PCT`% (default 1%) of **Dhan's executed price** | **Optional**, on by default (`FNO_SL_TARGET_ENABLED`). SL −`FNO_SL_PCT`% / target +`FNO_TARGET_PCT`% (default 3% each) of the **broker's executed price**; the Dhan super-order legs act only after the fill and are moved to the executed price |
 | Setup on the VM | `bash client_agent/deploy/setup.sh` | `bash fno_agent/deploy/setup.sh` |
 
 On the VM, both bots are controlled with one command: `bot status`, `bot logs`, `bot today`, `bot live equity|fno`, `bot test equity|fno`, `bot settings equity|fno`, `bot restart`, `bot update`. Run `bot help` for the full list. Both bots start in TEST mode (`DRY_RUN=true`) and share one Dhan login token (`~/.dhan_token`).
