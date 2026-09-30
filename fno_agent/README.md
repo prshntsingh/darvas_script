@@ -48,8 +48,20 @@ On the broadcaster, add `"enable_fno_trading": true` to the channel's entry in `
 
 The equity client (`client_agent/`) ignores FNO signals, so both can run side by side.
 
+### Key settings (`fno_agent/.env`, or `bot settings fno` on the VM)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `FNO_CAPITAL_PER_TRADE` | — | Rupees per trade. The bot buys as many whole lots as fit |
+| `FNO_MAX_LOTS` | `0` | Cap on lots per trade (`0` = no cap; the VM setup suggests `1` while testing) |
+| `FNO_SL_TARGET_ENABLED` | `true` | Place the signal's stop-loss/targets at the broker. `false` = one plain buy, and you manage exits yourself |
+| `FNO_CHASE_PCT` | `3` | Skip if the price is already this % above the entry range |
+| `FNO_ENTRY_TIMEOUT_SEC` | `300` | Cancel an unfilled entry after this long |
+| `FNO_MIN_DAYS_TO_EXPIRY` | `1` | Never buy a contract expiring sooner than this |
+| `DRY_RUN` | `true` | `true` = log the orders without placing them |
+
 ### Daily token handling
-- **Dhan**: set `DHAN_PIN` and `DHAN_TOTP_SECRET`. The agent logs in with TOTP at 08:00 IST and again whenever it gets a 401.
+- **Dhan**: set `DHAN_PIN` and `DHAN_TOTP_SECRET`. The agent logs in with TOTP at 08:00 IST. It shares that token with the equity bot through `~/.dhan_token`, so they don't log each other out. On a rejected token it adopts the shared one, or logs in again.
 - **Kite**: a manual login is needed every day. Run `python -m fno_agent.kite_login fno_agent/.env` after 07:30 IST. The agent reloads the token file at 08:00 and whenever a token error occurs, so no restart is needed.
 
 ## Deploying (Railway broadcaster + VM)
