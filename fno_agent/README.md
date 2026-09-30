@@ -26,7 +26,7 @@ Target-500,1000
    4. **Sizing**: `lots = floor(FNO_CAPITAL_PER_TRADE / (lot_size × entry_max))`. If that is 0 lots, the trade is skipped.
    5. **Price check**: skip if LTP is more than `FNO_CHASE_PCT` above the entry range, or already at the SL.
    6. **Entry**: a LIMIT buy at `min(entry_max, LTP + 2 ticks)`. It never uses a market order, because many options are illiquid. Anything unfilled after `FNO_ENTRY_TIMEOUT_SEC` is cancelled.
-   7. **Protection at the broker**, so it still works if the VM is down. Lots are split across the targets, and any remainder goes to the furthest target.
+   7. **Protection at the broker** (optional, on by default via `FNO_SL_TARGET_ENABLED`), so it still works if the VM is down. Lots are split across the targets, and any remainder goes to the furthest target. When it's turned off, the bot places one plain LIMIT buy for the full quantity and no SL/target orders.
       - **Dhan**: one **Super Order** per target tranche, with entry, target leg and SL leg, product `MARGIN` (carry-forward). Dhan Forever/OCO only supports CNC/MTF, so it can't be used for F&O positions carried overnight.
       - **Kite**: one NRML entry, then a **GTT OCO** per tranche after the fill. The SL leg's limit price is `FNO_SL_LIMIT_BUFFER_PCT` below the trigger.
    8. Every step is written to `fno_journal.db`. After a restart, unfinished trades are resumed: the agent checks the fill, cancels on timeout, and places any missing protection.
@@ -48,8 +48,20 @@ On the broadcaster, add `"enable_fno_trading": true` to the channel's entry in `
 
 The equity client (`client_agent/`) ignores FNO signals, so both can run side by side.
 
+### Key settings (`fno_agent/.env`, or `bot settings fno` on the VM)
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `FNO_CAPITAL_PER_TRADE` | — | Rupees per trade. The bot buys as many whole lots as fit |
+| `FNO_MAX_LOTS` | `0` | Cap on lots per trade (`0` = no cap; the VM setup suggests `1` while testing) |
+| `FNO_SL_TARGET_ENABLED` | `true` | Place the signal's stop-loss/targets at the broker. `false` = one plain buy, and you manage exits yourself |
+| `FNO_CHASE_PCT` | `3` | Skip if the price is already this % above the entry range |
+| `FNO_ENTRY_TIMEOUT_SEC` | `300` | Cancel an unfilled entry after this long |
+| `FNO_MIN_DAYS_TO_EXPIRY` | `1` | Never buy a contract expiring sooner than this |
+| `DRY_RUN` | `true` | `true` = log the orders without placing them |
+
 ### Daily token handling
-- **Dhan**: set `DHAN_PIN` and `DHAN_TOTP_SECRET`. The agent logs in with TOTP at 08:00 IST and again whenever it gets a 401.
+- **Dhan**: set `DHAN_PIN` and `DHAN_TOTP_SECRET`. The agent logs in with TOTP at 08:00 IST. It shares that token with the equity bot through `~/.dhan_token`, so they don't log each other out. On a rejected token it adopts the shared one, or logs in again.
 - **Kite**: a manual login is needed every day. Run `python -m fno_agent.kite_login fno_agent/.env` after 07:30 IST. The agent reloads the token file at 08:00 and whenever a token error occurs, so no restart is needed.
 
 ## Deploying (Railway broadcaster + VM)

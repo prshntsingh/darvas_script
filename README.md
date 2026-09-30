@@ -1,12 +1,36 @@
-# darvas_script: Telegram to Email & Notion Forwarder
+# darvas_script: Telegram Signal Broadcaster & Trading Bots
 
-A Python-based Telegram UserBot script that listens to specific channels and automatically forwards new messages to an Email address and logs them into a Notion page.
+A Telegram UserBot that listens to trading channels and does two things:
+- **Forwards and logs** every message to Notion, Discord, Email and Google Sheets.
+- **Broadcasts trade signals** over a WebSocket to two trading bots that place orders on Dhan (or Kite):
+  - the **equity bot** (`client_agent/`)
+  - the **options (FnO) bot** (`fno_agent/`)
+
+```
+Telegram ──► Broadcaster (main.py, Railway) ──wss──► Equity bot  (client_agent/, GCP VM) ──► Dhan
+                                            └─wss──► Options bot (fno_agent/,    GCP VM) ──► Dhan / Kite
+```
+
+## Trading bots at a glance
+
+| | Equity bot | Options (FnO) bot |
+|---|---|---|
+| Code | [`client_agent/`](client_agent/README.md) | [`fno_agent/`](fno_agent/README.md) |
+| Deploy guide | [`client_agent/DEPLOY.md`](client_agent/DEPLOY.md) | [`fno_agent/DEPLOY.md`](fno_agent/DEPLOY.md) |
+| Signals from | Channels with `"enable_trading": true` | Channels with `"enable_fno_trading": true` |
+| Example signal | `Buy #SBIN @ 805-810` | `#POLYCAB 8000 PE OCT @90-105 / SL-30 / Target-500,1000` |
+| Sizing | `TRADE_AMOUNT_INR` ÷ price | Whole lots that fit `FNO_CAPITAL_PER_TRADE` |
+| Stop-loss / target | **Optional**, off by default: `EQUITY_SL_TARGET_ENABLED` places fixed-% SL (`EQUITY_SL_PCT`) and target (`EQUITY_TARGET_PCT`, default 1%) as a Dhan super order | **Optional**, on by default: `FNO_SL_TARGET_ENABLED` places the signal's SL/targets at the broker |
+| Setup on the VM | `bash client_agent/deploy/setup.sh` | `bash fno_agent/deploy/setup.sh` |
+
+On the VM, both bots are controlled with one command: `bot status`, `bot logs`, `bot today`, `bot live equity|fno`, `bot test equity|fno`, `bot settings equity|fno`, `bot restart`, `bot update`. Run `bot help` for the full list. Both bots start in TEST mode (`DRY_RUN=true`) and share one Dhan login token (`~/.dhan_token`).
 
 ## Features
 - **Live Forwarding**: Instantly forwards incoming text and media captions.
 - **Notion Integration**: Appends messages to a Notion page with timestamps.
 - **Email Integration**: Sends SMTP emails with the message content.
 - **Discord Integration**: Forwards messages to Discord channels via webhooks.
+- **Trade Signal Broadcasting**: Parses equity and option calls, using regex first and Gemini as a fallback. It also resolves company names to tickers (e.g. "MANIPAL PAYMENT" → `MPIMANIPAL`). Signals are pushed to the trading bots over an authenticated WebSocket.
 - **AI Trade Extraction**: Uses Vertex AI (Gemini) to detect trade setups and log them to Google Sheets with auto-calculated targets, stop losses, and live price tracking.
 - **Multiple Channel Mappings**: Map multiple Telegram channels to individual Discord webhooks within a single bot process — no need to run separate instances.
 - **Checkpointing (Catch-up)**: If the script goes offline, it automatically remembers where it left off and catches up on any missed messages when restarted.
@@ -45,8 +69,11 @@ A Python-based Telegram UserBot script that listens to specific channels and aut
    DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/...
    
    VERTEX_PROJECT_ID=your_gcp_project_id
-   VERTEX_LOCATION=us-central1
+   GEMINI_LOCATION=global          # Gemini endpoint (default: global)
    GOOGLE_SHEET_ID=your_google_sheet_id
+
+   WS_AUTH_TOKEN=a_long_random_password   # the trading bots connect with this
+   FNO_MAX_SIGNAL_AGE_SEC=120             # option signals older than this are never broadcast
    ```
 
 ## Multiple Channel Mappings
@@ -64,10 +91,18 @@ Each mapping object supports these fields:
 | `telegram_channel_id` | ✅ | The Telegram channel ID to listen to |
 | `discord_webhook_url` | ❌ | Discord webhook URL for this channel (omit to skip Discord) |
 | `label` | ❌ | A friendly name for logs (defaults to the channel ID) |
+| `enable_trading` | ❌ | `true` = broadcast **equity** signals from this channel to the equity bot |
+| `enable_fno_trading` | ❌ | `true` = broadcast **option** signals from this channel to the FnO bot |
 
 > **Backward compatible**: If `CHANNEL_MAPPINGS` is not set, the bot automatically uses the legacy `TG_TARGET_CHANNEL_ID` + `DISCORD_WEBHOOK_URL` as a single mapping. No changes needed for existing setups.
 
 **Shared services**: Notion, Google Sheets, and AI trade extraction remain shared across all channel mappings — they use the same global configuration.
+
+## Deploying the trading setup
+
+- **Broadcaster (Railway):** see Part 1 of [`client_agent/DEPLOY.md`](client_agent/DEPLOY.md) (equity server) and [`fno_agent/DEPLOY.md`](fno_agent/DEPLOY.md) (options server).
+  - Each Railway broadcaster needs its own `WS_AUTH_TOKEN` and its own `TG_SESSION_STRING`.
+- **Bots (GCP VM):** see Part 2 of the same guides. Each bot is one command with guided questions.
 
 ## Cloud Deployment (Optional)
 If you want to host this on a cloud provider like Koyeb, you need a String Session instead of a local SQLite session file.

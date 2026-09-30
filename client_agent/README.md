@@ -99,6 +99,12 @@ TRADE_AMOUNT_INR=10000
 # Fixed quantity fallback for MARKET orders if live price fetch fails.
 DEFAULT_QUANTITY=10
 
+# --- Optional stop-loss + target (off by default) ---
+# true = live-market buys are placed as a Dhan super order with SL and target attached
+EQUITY_SL_TARGET_ENABLED=false
+EQUITY_SL_PCT=2          # required when enabled: stop-loss % below entry
+EQUITY_TARGET_PCT=1      # target % above entry
+
 # IMPORTANT: Start with DRY_RUN=true to test without placing real orders
 DRY_RUN=true
 ```
@@ -191,7 +197,14 @@ The client receives JSON signals via WebSocket:
 - **MARKET** orders fetch the exact live real-time price instantly using Yahoo Finance (Dhan) or Kite Connect APIs.
 - **AMO** (After Market Orders) auto-detected: weekends + before 9:15 AM / after 3:15 PM IST
 - **Quantity**: Automatically calculated based on `TRADE_AMOUNT_INR / Price`.
-- **Auto-Login**: Dhan token auto-refreshes seamlessly in the middle of a trade if a `401 Unauthorized` token expiry occurs!
+- **Stop-loss + target (optional)**: with `EQUITY_SL_TARGET_ENABLED=true`, each live-market buy is sent as one **Dhan super order** with a stop-loss and a target attached.
+  - SL = `EQUITY_SL_PCT`% below the entry price; target = `EQUITY_TARGET_PCT`% above it (default 1%).
+  - The entry price is the LIMIT price sent, or the live price for MARKET orders. Prices are rounded to ₹0.05.
+  - **AMO orders** can't carry SL/target and are placed without them, with a warning. The same applies to MARKET orders when no live price is available.
+  - With the flag off (the default), orders are exactly as before.
+- **Auto-Login**: Dhan logs in with PIN + TOTP.
+  - The equity and FnO bots share one token (`~/.dhan_token`), so they don't log each other out.
+  - If Dhan rejects a token mid-trade (`401`, `DH-901`, or `DH-906 Invalid Token`), the bot refreshes it and retries the order once.
 
 ## Auto-Reconnection
 

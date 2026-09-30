@@ -45,6 +45,13 @@ set_env FNO_CAPITAL_PER_TRADE "$AMOUNT" "$ENV"
 set_env FNO_MAX_LOTS "${MAXLOTS:-0}" "$ENV"
 set_env FNO_TG_BOT_TOKEN "$TG_TOKEN" "$ENV"
 set_env FNO_TG_CHAT_ID "$TG_CHAT" "$ENV"
+current_sltp=$(get_env FNO_SL_TARGET_ENABLED "$ENV" | tr '[:upper:]' '[:lower:]')
+if yes_no "Place the signal's stop-loss and targets at Dhan automatically? (recommended)" "$([ "$current_sltp" = false ] && echo n || echo y)"; then
+    set_env FNO_SL_TARGET_ENABLED true "$ENV"
+else
+    set_env FNO_SL_TARGET_ENABLED false "$ENV"
+    warn "Options trades will have NO stop-loss/target at Dhan. Manage exits yourself."
+fi
 [ -n "$(get_env DRY_RUN "$ENV")" ] || set_env DRY_RUN true "$ENV"
 ok "Settings saved to fno_agent/.env"
 
