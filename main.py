@@ -347,8 +347,9 @@ async def handle_fno_message(text: str, message, signal_id: str, mapping) -> boo
 
     desc = (
         f"{fno_signal['symbol']} {fno_signal['strike']:g}{fno_signal['option_type']} "
-        f"{fno_signal.get('expiry_month') or ''} @ {fno_signal['entry_min']:g}-{fno_signal['entry_max']:g} "
-        f"SL {fno_signal['stop_loss']:g} T {','.join(f'{t:g}' for t in fno_signal['targets'])}"
+        f"{fno_signal.get('expiry_month') or ''} @ {fno_signal['entry_min']:g}-{fno_signal['entry_max']:g}"
+        + (f" SL {fno_signal['stop_loss']:g}" if fno_signal.get('stop_loss') else "")
+        + (f" T {','.join(f'{t:g}' for t in fno_signal['targets'])}" if fno_signal.get('targets') else "")
     )
 
     age_sec = (datetime.now(timezone.utc) - message.date).total_seconds()

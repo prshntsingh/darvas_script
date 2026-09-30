@@ -37,8 +37,8 @@ echo
 echo " Stop-loss and target (optional): attach both to every live-market buy at Dhan."
 current_sltp=$(get_env EQUITY_SL_TARGET_ENABLED "$ENV" | tr '[:upper:]' '[:lower:]')
 if yes_no "Place a stop-loss and target automatically?" "$([ "$current_sltp" = true ] && echo y || echo n)"; then
-    ask_pct SL_PCT "Stop-loss: % below the entry price (e.g. 2)" "$(get_env EQUITY_SL_PCT "$ENV")"
-    ask_pct TARGET_PCT "Target: % above the entry price" "$(x=$(get_env EQUITY_TARGET_PCT "$ENV"); echo "${x:-1}")"
+    ask_pct SL_PCT "Stop-loss: % below the executed price (e.g. 2)" "$(get_env EQUITY_SL_PCT "$ENV")"
+    ask_pct TARGET_PCT "Target: % above the executed price" "$(x=$(get_env EQUITY_TARGET_PCT "$ENV"); echo "${x:-1}")"
     set_env EQUITY_SL_TARGET_ENABLED true "$ENV"
     set_env EQUITY_SL_PCT "$SL_PCT" "$ENV"
     set_env EQUITY_TARGET_PCT "$TARGET_PCT" "$ENV"

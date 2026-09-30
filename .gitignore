@@ -12,3 +12,4 @@ temp
 fno_agent/logs/
 fno_agent/*.db
 fno_agent/.kite_token
+client_agent/.pending_protection.json*

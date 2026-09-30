@@ -13,8 +13,11 @@ fallback for messages that clearly mention an option but don't fit the regex.
 Safety rules:
 - Only BUY entries are produced. Messages containing exit wording
   (exit / book / sell / square off / sl hit) never become an entry.
-- A signal must have symbol, strike, CE/PE, entry, stop-loss and at least one
-  target, with SL < entry < targets. Anything else is rejected.
+- A signal must have symbol, strike, CE/PE and an entry price.
+- Stop-loss and targets are optional and informational: the FnO bot sets its own
+  SL/target as a % of the entry price (FNO_SL_PCT / FNO_TARGET_PCT). Values that
+  don't make sense (SL at/above entry, targets at/below entry) are dropped, not
+  used to reject the signal.
 """
 
 import asyncio
@@ -39,7 +42,7 @@ class FnOSignal(BaseModel):
     expiry_day: Optional[int] = None
     entry_min: float
     entry_max: float
-    stop_loss: float
+    stop_loss: Optional[float] = None
     targets: List[float] = Field(default_factory=list)
     caution: bool = False  # "limited qty", "add slowly", ... (informational)
     hold_hint: Optional[str] = None
@@ -87,15 +90,11 @@ def _validate(sig: FnOSignal) -> Optional[FnOSignal]:
         return _reject(sig, "option type not CE/PE")
     if sig.strike <= 0 or sig.entry_min <= 0:
         return _reject(sig, "non-positive strike/entry")
-    if not sig.stop_loss or sig.stop_loss <= 0:
-        return _reject(sig, "missing stop-loss")
-    if sig.stop_loss >= sig.entry_min:
-        return _reject(sig, f"SL {sig.stop_loss} not below entry {sig.entry_min}")
-    sig.targets = sorted(t for t in sig.targets if t and t > 0)
-    if not sig.targets:
-        return _reject(sig, "missing target")
-    if sig.targets[0] <= sig.entry_max:
-        return _reject(sig, f"target {sig.targets[0]} not above entry {sig.entry_max}")
+    # SL/targets are optional (the bot uses its own %); keep only values that make sense
+    if sig.stop_loss is not None and not (0 < sig.stop_loss < sig.entry_min):
+        logger.info(f"[FNO PARSER] Ignoring SL {sig.stop_loss} for {sig.symbol} (not below entry {sig.entry_min})")
+        sig.stop_loss = None
+    sig.targets = sorted(t for t in sig.targets if t and t > sig.entry_max)
     return sig
 
 
@@ -147,7 +146,7 @@ def parse_fno_regex(text: str) -> Optional[FnOSignal]:
         expiry_day=int(m.group("day")) if m.group("day") else None,
         entry_min=e1,
         entry_max=e2,
-        stop_loss=stop_loss or 0,
+        stop_loss=stop_loss,
         targets=targets,
         caution=bool(_CAUTION_RE.search(text)),
         hold_hint=hold_m.group(0).strip() if hold_m else None,
@@ -168,8 +167,8 @@ class GeminiFnOSignal(BaseModel):
     expiry_month: Optional[str] = Field(default=None, description="3-letter month like OCT if mentioned, else null")
     entry_min: float
     entry_max: float
-    stop_loss: float
-    targets: List[float]
+    stop_loss: Optional[float] = Field(default=None, description="Stop-loss premium if mentioned, else null")
+    targets: List[float] = Field(default_factory=list, description="Target premiums if mentioned, else empty")
 
 
 _FNO_PROMPT = """You extract option BUY calls from Indian stock market Telegram messages.

@@ -73,17 +73,24 @@ The bot starts in **TEST mode**: it receives signals and shows what it *would* b
 3. To go back to test mode at any time: `bot test equity`.
 
 ### Stop-loss and target (optional, off by default)
-When this is on, every buy during market hours is placed at Dhan as one order with a **stop-loss and target attached**. Both are fixed percentages of the entry price:
+When this is on, the bot places a stop-loss and target at Dhan **only after a buy has actually executed**. Both are a fixed percentage of the **executed price reported by Dhan**:
 
 | Setting (`bot settings equity`) | Meaning |
 |---|---|
 | `EQUITY_SL_TARGET_ENABLED` | `true` = on, `false` = off (the default; orders are placed as before) |
-| `EQUITY_SL_PCT` | Stop-loss, % below the entry price. **Required** when on, e.g. `2` |
-| `EQUITY_TARGET_PCT` | Target, % above the entry price. Default `1` |
+| `EQUITY_SL_PCT` | Stop-loss, % below the executed price. **Required** when on, e.g. `2` |
+| `EQUITY_TARGET_PCT` | Target, % above the executed price. Default `1` |
 
-- **Entry price used:** the limit price sent to Dhan, or the live price for market orders. Example: entry ₹101 with `EQUITY_SL_PCT=2` and a 1% target gives SL ₹99.00 and target ₹102.00.
-- **After-market orders (AMO)** can't carry a stop-loss/target, so they are placed **without** them and the log says so.
-- **Missing live price:** if the live price for a market order isn't available, that order is also placed without them.
+How it works:
+1. The buy is placed as a normal order, live or AMO.
+2. The bot checks that order at Dhan every few seconds. **Until Dhan reports it as executed, nothing else is placed.** If it's cancelled, rejected or expires without executing, no stop-loss or target is ever placed.
+3. As soon as Dhan reports shares executed, the bot reads the **average executed price** from Dhan. It then places a Dhan **Forever Order (OCO)** for exactly those shares: a sell at the target, and a sell if the price falls to the stop-loss. When one of them executes, Dhan cancels the other.
+
+- **Example:** executed at ₹101.30 with `EQUITY_SL_PCT=2` and a 1% target gives SL ₹99.25 and target ₹102.35. The stop-loss rounds down and the target rounds up to ₹0.05.
+- **Partial fills:** each executed part gets its own stop-loss/target at that part's price.
+- **After-market orders (AMO):** protected too, after they execute at the next open. The bot remembers pending orders across restarts (file `client_agent/.pending_protection.json`).
+- **No executed price from Dhan yet:** the bot waits rather than guessing.
+- **Dhan rejects the stop-loss/target order:** the bot retries every minute, and the log shows `UNPROTECTED`.
 - **Turning it on or off:** `bot setup equity` asks "Place a stop-loss and target automatically?", or change the settings above with `bot settings equity`.
 - **Missing stop-loss %:** if the feature is on but `EQUITY_SL_PCT` is empty, the bot refuses to start and the log says why.
 

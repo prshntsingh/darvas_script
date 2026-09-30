@@ -46,7 +46,7 @@ python generate_string_session.py   # log in, copy the printed string into this 
 
 **Check the broadcaster:**
 - **Health:** open `https://<fno-service>.up.railway.app/health`. It should say healthy.
-- **Logs:** a parsed option call shows up as `[⚡ FNO] POLYCAB 8000PE OCT @ 90-105 SL 30 T 500,1000`.
+- **Logs:** a parsed option call shows up as `[⚡ FNO] POLYCAB 8000PE OCT @ 90-105 SL 30 T 500,1000`. SL/targets appear only when the message has them; the bot ignores them and uses its own %.
 - **Address for the bot:** `wss://<fno-service>.up.railway.app/ws`. Give this and the `WS_AUTH_TOKEN` to whoever runs Part 2.
 
 ---
@@ -94,7 +94,7 @@ The bot starts in **TEST mode**: it receives option signals and shows the contra
 ### What runs automatically
 - **Start and restart:** the bot starts when the VM starts, and restarts within 10 seconds if it crashes.
 - **Daily refresh:** at 08:00 IST a fresh Dhan login; at 08:30 IST today's contract list (lot sizes, expiries).
-- **Protection at Dhan** (on by default): the signal's stop-loss and targets are placed at Dhan with each entry, so they still work if the VM is down. To turn this off, set `FNO_SL_TARGET_ENABLED=false` (`bot settings fno`, or answer **n** in `bot setup fno`). The bot then only places the buy, and you manage exits yourself. A trade keeps the setting it was entered with, even across restarts.
+- **Protection at Dhan** (on by default): a stop-loss **3% below** and a target **3% above** the **executed price reported by Dhan**, so they still work if the VM is down. The buy goes in as a Dhan super order, whose SL/target legs only act if the buy executes. The moment Dhan confirms the fill, the bot moves both legs to ±3% of the executed price. Change the % with `FNO_SL_PCT` / `FNO_TARGET_PCT` (`bot settings fno`, or the questions in `bot setup fno`). The message's own SL/targets are ignored. To turn protection off, set `FNO_SL_TARGET_ENABLED=false` (`bot settings fno`, or answer **n** in `bot setup fno`). The bot then only places the buy, and you manage exits yourself. A trade keeps the setting it was entered with, even across restarts.
 - **Crash recovery:** after a restart, any trade in progress is picked up again. Its fill is checked and the protection is completed.
 - **Market hours:** new entries only 09:15–15:25 IST on weekdays, skipping the dates in `fno_agent/holidays.json` (**update this every year**).
 

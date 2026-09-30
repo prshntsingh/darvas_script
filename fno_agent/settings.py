@@ -30,7 +30,9 @@ class Settings:
     poll_interval_sec: float = 2.0
     min_days_to_expiry: int = 1
     sl_limit_buffer_pct: float = 5.0  # Kite GTT SL leg: limit price this % below trigger
-    sl_target_enabled: bool = True  # place the signal's SL/targets at the broker (FNO_SL_TARGET_ENABLED)
+    sl_target_enabled: bool = True  # place SL/target at the broker (FNO_SL_TARGET_ENABLED)
+    sl_pct: float = 3.0  # stop-loss this % below the entry price (FNO_SL_PCT)
+    target_pct: float = 3.0  # single target this % above the entry price (FNO_TARGET_PCT)
     enforce_market_hours: bool = True
 
     # Dhan
@@ -69,6 +71,8 @@ class Settings:
             min_days_to_expiry=int(e("FNO_MIN_DAYS_TO_EXPIRY", "1")),
             sl_limit_buffer_pct=float(e("FNO_SL_LIMIT_BUFFER_PCT", "5")),
             sl_target_enabled=_bool("FNO_SL_TARGET_ENABLED", "true"),
+            sl_pct=float(e("FNO_SL_PCT", "3") or 3),
+            target_pct=float(e("FNO_TARGET_PCT", "3") or 3),
             enforce_market_hours=_bool("FNO_ENFORCE_MARKET_HOURS", "true"),
             dhan_client_id=e("DHAN_CLIENT_ID", ""),
             dhan_access_token=e("DHAN_ACCESS_TOKEN", ""),
