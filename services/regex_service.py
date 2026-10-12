@@ -24,9 +24,9 @@ from services.scrip_service import VALID_EQUITY_SYMBOLS, normalize_name, resolve
 # Hashtag extraction: #SBIN, # RELIANCE, etc.
 _HASHTAG_PATTERN = re.compile(r'#\s*([a-zA-Z]+)')
 
-# Action + symbol: "buy SBIN", "bought in RELIANCE", "added TATAMOTORS"
+# Action + symbol: "buy SBIN", "bought in RELIANCE", "added TATAMOTORS", plus typos
 _ACTION_SYMBOL_PATTERN = re.compile(
-    r'(?:buy|bought|added)\s+(?:in\s+)?(?:#\s*)?([a-zA-Z]+)',
+    r'(?:buy|biy|bought|boght|bougth|bot|baught|add|asd|added|aded)\s+(?:in\s+)?(?:#\s*)?([a-zA-Z]+)',
     re.IGNORECASE,
 )
 
@@ -34,7 +34,7 @@ _ACTION_SYMBOL_PATTERN = re.compile(
 _WORD = r"[A-Za-z&][A-Za-z&.\-]*"
 _HASHTAG_PHRASE_PATTERN = re.compile(r'#\s*(' + _WORD + r'(?:[ \t]+' + _WORD + r'){0,5})')
 _ACTION_PHRASE_PATTERN = re.compile(
-    r'(?:buy|bought|added)\s+(?:in\s+)?(?:#\s*)?(' + _WORD + r'(?:[ \t]+' + _WORD + r'){0,5})',
+    r'(?:buy|biy|bought|boght|bougth|bot|baught|add|asd|added|aded)\s+(?:in\s+)?(?:#\s*)?(' + _WORD + r'(?:[ \t]+' + _WORD + r'){0,5})',
     re.IGNORECASE,
 )
 # Words that end a company-name phrase ("Bought Manipal Payment at 450 for positional")
@@ -51,7 +51,7 @@ _PRICE_PATTERN = re.compile(
 
 # BUY intent filter: message must contain at least one of these to be actionable
 _BUY_INTENT_PATTERN = re.compile(
-    r'\b(buy|bought|added|add|accumulate|accumulated|sl|target|entry|cmp)\b',
+    r'\b(buy|biy|bought|boght|bougth|bot|baught|added|aded|add|asd|accumulate|accumulated|sl|target|entry|cmp)\b',
     re.IGNORECASE,
 )
 
@@ -88,8 +88,8 @@ _ANALYSIS_KEYWORDS = frozenset({
 _NOISE_WORDS = frozenset({
     "THEM", "IT", "THIS", "THE", "SOME", "NOW", "TODAY", "MORE", "ALL",
     "BUY", "SELL", "BOUGHT", "ADDED", "ADD", "IN", "AT", "FOR",
+    "BIY", "BOGHT", "BOUGTH", "BOT", "BAUGHT", "ASD", "ADED"
 })
-
 
 def filter_message(text: str) -> str | None:
     """
