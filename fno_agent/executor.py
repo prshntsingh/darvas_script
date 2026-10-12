@@ -132,7 +132,7 @@ class FnOExecutor:
 
         contract = self.resolver.resolve(sig.symbol, sig.strike, sig.option_type,
                                          sig.expiry_month, sig.expiry_day, today=now.date())
-        size = size_position(self.s.capital_per_trade, contract.lot_size, sig.entry_max, self.s.max_lots)
+        size = size_position(self.s.capital_per_trade, contract.lot_size, sig.entry_max * 1.02, self.s.max_lots)
         if size.lots == 0:
             return await self._reject(
                 sid, f"1 lot of {contract.describe()} costs ₹{size.cost_per_lot:,.0f} "
@@ -143,10 +143,15 @@ class FnOExecutor:
         if ltp is not None:
             if ltp > sig.entry_max * (1 + self.s.chase_pct / 100):
                 return await self._reject(sid, f"missed entry: LTP {ltp} > {sig.entry_max} +{self.s.chase_pct}% ({desc})")
-            limit = min(sig.entry_max, ltp + ENTRY_TICKS_ABOVE_LTP * tick)
+            
+            # CHANGED: Force limit price to be 2% above the maximum allowed entry
+            limit = sig.entry_max * 1.02
         else:
-            logger.warning(f"No LTP for {contract.describe()}; using entry_max as limit.")
-            limit = sig.entry_max
+            logger.warning(f"No LTP for {contract.describe()}; using entry_max + 2% as limit.")
+            
+            # CHANGED: Apply the same 2% rule even if LTP fetching fails
+            limit = sig.entry_max * 1.02
+            
         limit = round_to_tick(limit, tick, "down")
         sl, targets = levels(limit, contract, self.s.sl_pct, self.s.target_pct)
         if self.s.sl_target_enabled and sl >= limit:
