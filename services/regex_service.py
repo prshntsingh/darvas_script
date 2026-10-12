@@ -82,8 +82,8 @@ _ANALYSIS_KEYWORDS = frozenset({
     "monday", "tuesday", "wednesday", "thursday", "friday",
     "ema", "sma", "dma", "support", "resistance", "trendline",
     "watching", "watch", "view",
+    "sitting", "holding", "loss", "not gud to add", "not good to add"  # <--- Added your new words here
 })
-
 # --- Common English words that are NOT stock symbols ---
 _NOISE_WORDS = frozenset({
     "THEM", "IT", "THIS", "THE", "SOME", "NOW", "TODAY", "MORE", "ALL",
